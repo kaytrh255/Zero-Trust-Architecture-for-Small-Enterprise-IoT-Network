@@ -1,0 +1,17 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Maven / Java
+**/target/
+*.class
+
+# IDEs and operating systems
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Logs
+*.log
