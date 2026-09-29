@@ -1,5 +1,6 @@
 package com.yak.zerotrust.service;
 
+import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.dto.DeviceResponse;
 import com.yak.zerotrust.entity.Device;
@@ -21,10 +22,16 @@ public class DeviceService {
 
     private final DeviceRepository deviceRepository;
     private final UserRepository userRepository;
+    private final DeviceCredentialService deviceCredentialService;
 
-    public DeviceService(DeviceRepository deviceRepository, UserRepository userRepository) {
+    public DeviceService(
+            DeviceRepository deviceRepository,
+            UserRepository userRepository,
+            DeviceCredentialService deviceCredentialService
+    ) {
         this.deviceRepository = deviceRepository;
         this.userRepository = userRepository;
+        this.deviceCredentialService = deviceCredentialService;
     }
 
     @Transactional(readOnly = true)
@@ -40,13 +47,14 @@ public class DeviceService {
     }
 
     @Transactional
-    public DeviceResponse create(DeviceRequest request, Long ownerId) {
+    public DeviceProvisioningResponse create(DeviceRequest request, Long ownerId) {
         String deviceCode = normalizeCode(request.deviceCode());
         String mqttClientId = request.mqttClientId().trim();
         ensureUnique(deviceCode, mqttClientId, null);
 
         UserAccount owner = userRepository.findById(ownerId)
                 .orElseThrow(UserNotFoundException::new);
+        DeviceCredentialService.IssuedCredential credential = deviceCredentialService.issue();
         Device device = new Device(
                 deviceCode,
                 request.deviceName().trim(),
@@ -55,7 +63,17 @@ public class DeviceService {
                 mqttClientId,
                 owner
         );
-        return toResponse(deviceRepository.save(device));
+        device.replaceMqttCredentialHash(credential.passwordHash());
+        Device savedDevice = deviceRepository.save(device);
+        return new DeviceProvisioningResponse(toResponse(savedDevice), credential.token());
+    }
+
+    @Transactional
+    public DeviceProvisioningResponse rotateMqttCredential(Long id) {
+        Device device = findDevice(id);
+        DeviceCredentialService.IssuedCredential credential = deviceCredentialService.issue();
+        device.replaceMqttCredentialHash(credential.passwordHash());
+        return new DeviceProvisioningResponse(toResponse(device), credential.token());
     }
 
     @Transactional

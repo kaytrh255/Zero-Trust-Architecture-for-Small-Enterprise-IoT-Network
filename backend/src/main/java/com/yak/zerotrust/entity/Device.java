@@ -43,6 +43,9 @@ public class Device {
     @Column(name = "mqtt_client_id", nullable = false, length = 100)
     private String mqttClientId;
 
+    @Column(name = "mqtt_credential_hash", length = 100)
+    private String mqttCredentialHash;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private DeviceStatus status;
@@ -102,6 +105,10 @@ public class Device {
         this.status = status;
     }
 
+    public void replaceMqttCredentialHash(String mqttCredentialHash) {
+        this.mqttCredentialHash = mqttCredentialHash;
+    }
+
     public void recordTelemetryReceived(Instant receivedAt) {
         this.lastSeenAt = receivedAt;
     }
@@ -128,6 +135,10 @@ public class Device {
 
     public String getMqttClientId() {
         return mqttClientId;
+    }
+
+    public String getMqttCredentialHash() {
+        return mqttCredentialHash;
     }
 
     public DeviceStatus getStatus() {

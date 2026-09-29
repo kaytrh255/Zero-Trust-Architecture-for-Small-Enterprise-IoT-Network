@@ -8,4 +8,6 @@ import java.util.List;
 public interface DeviceTelemetryRepository extends JpaRepository<DeviceTelemetry, Long> {
 
     List<DeviceTelemetry> findTop100ByOrderByReceivedAtDesc();
+
+    List<DeviceTelemetry> findTop100ByDevice_DeviceCodeOrderByReceivedAtDesc(String deviceCode);
 }

@@ -24,6 +24,13 @@ public class TelemetryQueryService {
                 .toList();
     }
 
+    @Transactional(readOnly = true)
+    public List<TelemetryResponse> getRecentForDevice(String deviceCode) {
+        return telemetryRepository.findTop100ByDevice_DeviceCodeOrderByReceivedAtDesc(deviceCode).stream()
+                .map(this::toResponse)
+                .toList();
+    }
+
     private TelemetryResponse toResponse(DeviceTelemetry telemetry) {
         return new TelemetryResponse(
                 telemetry.getId(),

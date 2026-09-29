@@ -69,7 +69,11 @@ Request:
 }
 ```
 
-Returns HTTP `201 Created`. Types: `SENSOR`, `CAMERA`, `ACTUATOR`, `GATEWAY`.
+Returns HTTP `201 Created` with `{ "device": { ...safe device fields... }, "deviceToken": "<one-time token>" }`. The token is random, returned only once, and its BCrypt hash is stored. Types: `SENSOR`, `CAMERA`, `ACTUATOR`, `GATEWAY`.
+
+### `POST /api/devices/{id}/credentials/rotate` — `ADMIN`
+
+Returns HTTP `200 OK`, issues a new random MQTT application token for that device, returns it once, and invalidates the previous token. Use this route to provision the bootstrapped demo devices or recover a lost token. The response uses the same shape as device creation.
 
 ### `PUT /api/devices/{id}` — `ADMIN`
 
@@ -177,16 +181,29 @@ Other reasons: `EXPLICIT_DENY`, `NO_MATCHING_POLICY`, `DEVICE_NOT_FOUND`, `DEVIC
 
 ### `GET /api/access/audits` — `ADMIN`, `SECURITY_ANALYST`
 
-Returns up to the most recent 100 evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, matching-policy snapshot, and time. Every valid API decision and evaluated MQTT telemetry attempt is stored in `access_audits`; malformed requests rejected before evaluation are not.
+Returns up to the most recent 100 evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, matching-policy snapshot, and time. Every valid API decision, evaluated MQTT telemetry attempt, and syntactically valid MQTT message with an invalid device token is stored in `access_audits`; malformed requests rejected before evaluation are not.
 
-## MQTT telemetry (Phase 5)
+## Protected telemetry resource (Phase 6)
 
-The local Mosquitto broker requires the shared local MQTT username/password configured in `.env`. It listens on the host loopback interface. The backend subscribes to `iot/telemetry/+`; the topic suffix must be a registered device code.
+### `GET /api/resources/devices/{deviceCode}/telemetry` — authenticated
+
+This is a protected demo resource route, not just a decision check. The API derives the requester ID/name/role from the JWT and always evaluates the fixed `sensor-data` / `READ` operation against the registered target device. `USER`/`DEVICE` are eligible requester roles; an authenticated management role receives a recorded DENY. It queries telemetry only if the decision is `ALLOW`.
+
+- `ALLOW`: HTTP `200`, with an `accessDecision` (including audit ID) and up to 100 telemetry samples for that device.
+- `DENY`: HTTP `403`, with the denied `accessDecision` and an empty telemetry array. No telemetry query is run.
+- Missing/invalid JWT: HTTP `401`.
+
+For the seeded rules, an active sensor is allowed, the blocked `SENSOR-002` is denied by status, and `CAMERA-001` is denied because it has no `sensor-data` / `READ` policy. The decision and denial are audited.
+
+## MQTT telemetry (Phase 6)
+
+The local Mosquitto broker still requires the shared local MQTT username/password configured in `.env` and listens on the host loopback interface. The backend subscribes to `iot/telemetry/+`; the topic suffix must match the device code whose application token is in the body.
 
 Message body:
 
 ```json
 {
+  "deviceToken": "<one-time token returned when the device is created/rotated>",
   "metric": "temperature",
   "value": 22.5,
   "unit": "C",
@@ -194,11 +211,13 @@ Message body:
 }
 ```
 
-`measuredAt` is optional; when omitted, receive time is used. The payload is limited to 2048 bytes and validates metric, numeric precision, unit, and timestamp. Each valid message is checked as a `DEVICE`/`MQTT` request for `device-telemetry` / `WRITE`. Only an `ALLOW` for an `ACTIVE` registered sensor/camera is stored; DENY is audited and the telemetry row is not written. Accepted messages update `devices.last_seen_at`.
+`deviceToken` is a random 256-bit bearer credential issued once by `POST /api/devices` or `POST /api/devices/{id}/credentials/rotate`. Only its BCrypt hash is stored. Tokens are bound to the registered device code: using a token on another device's topic is rejected. Rotating a token invalidates the previous one. `measuredAt` is optional; when omitted, receive time is used. The payload is limited to 2048 bytes and validates the token, metric, numeric precision, unit, and timestamp.
+
+After credential validation, each message is checked as a `DEVICE`/`MQTT` request for `device-telemetry` / `WRITE`. Only an `ALLOW` for an `ACTIVE` registered sensor/camera is stored; policy/status DENY is audited and the telemetry row is not written. A well-formed message with an invalid token is also audited as `INVALID_DEVICE_CREDENTIAL` without attributing it to the claimed device. Malformed topics/payloads are logged and discarded before policy evaluation. Accepted messages update `devices.last_seen_at`.
 
 ### `GET /api/telemetry` — `ADMIN`, `SECURITY_ANALYST`
 
-Returns the most recent 100 accepted telemetry samples. MQTT uses a single shared local credential in this prototype; it is not a per-device identity or ACL system.
+Returns the most recent 100 accepted telemetry samples. The device token authenticates at the application ingestion layer; the broker still uses a shared local login and does not apply per-device topic ACLs. MQTT is non-TLS in this local Compose setup, so tokens should not be used over an untrusted network.
 
 ## Error responses
 
@@ -214,6 +233,6 @@ Validation, authentication, authorization, and application errors use a consiste
 }
 ```
 
-Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role for a management/read API, `404` missing resource, `409` duplicate identifier/name, and `500` unexpected server error. An evaluated access `DENY` is an HTTP `200` decision body, not an HTTP `403`.
+Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role or a DENY at the protected telemetry route, `404` missing resource, `409` duplicate identifier/name, and `500` unexpected server error. A DENY from `POST /api/access/check` is an HTTP `200` decision body. A protected resource DENY is HTTP `403` with a `ProtectedTelemetryResponse` containing the access decision and an empty telemetry array, not an `ApiError` body.
 
-Authentication-attempt and policy-change audits, dashboard endpoints, TLS, per-device MQTT credentials, and transparent enforcement on arbitrary IoT resources are not implemented yet.
+API authentication and policy-change audits, dashboard endpoints, TLS, broker-side per-device MQTT logins/topic ACLs, and transparent enforcement on arbitrary IoT resources are not implemented yet.

@@ -1,5 +1,6 @@
 package com.yak.zerotrust.controller;
 
+import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.dto.DeviceResponse;
 import com.yak.zerotrust.dto.DeviceStatusRequest;
@@ -47,11 +48,17 @@ public class DeviceController {
     @PostMapping
     @PreAuthorize("hasRole('ADMIN')")
     @ResponseStatus(HttpStatus.CREATED)
-    public DeviceResponse create(
+    public DeviceProvisioningResponse create(
             @Valid @RequestBody DeviceRequest request,
             @AuthenticationPrincipal UserPrincipal principal
     ) {
         return deviceService.create(request, principal.getId());
+    }
+
+    @PostMapping("/{id}/credentials/rotate")
+    @PreAuthorize("hasRole('ADMIN')")
+    public DeviceProvisioningResponse rotateMqttCredential(@PathVariable Long id) {
+        return deviceService.rotateMqttCredential(id);
     }
 
     @PutMapping("/{id}")
