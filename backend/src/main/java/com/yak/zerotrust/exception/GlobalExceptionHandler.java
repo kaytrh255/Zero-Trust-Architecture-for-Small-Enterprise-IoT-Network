@@ -33,6 +33,14 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.CONFLICT, "CONFLICT", exception.getMessage(), request);
     }
 
+    @ExceptionHandler(PolicyConflictException.class)
+    public ResponseEntity<ApiError> handlePolicyConflict(
+            PolicyConflictException exception,
+            HttpServletRequest request
+    ) {
+        return error(HttpStatus.CONFLICT, "CONFLICT", exception.getMessage(), request);
+    }
+
     @ExceptionHandler(DeviceConflictException.class)
     public ResponseEntity<ApiError> handleDeviceConflict(
             DeviceConflictException exception,
@@ -49,7 +57,7 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.CONFLICT, "CONFLICT", "A record with the same unique value already exists", request);
     }
 
-    @ExceptionHandler({DeviceNotFoundException.class, UserNotFoundException.class})
+    @ExceptionHandler({DeviceNotFoundException.class, PolicyNotFoundException.class, UserNotFoundException.class})
     public ResponseEntity<ApiError> handleMissingEntity(HttpServletRequest request) {
         return error(HttpStatus.NOT_FOUND, "NOT_FOUND", "Requested resource was not found", request);
     }

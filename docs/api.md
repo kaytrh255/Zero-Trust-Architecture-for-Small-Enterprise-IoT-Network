@@ -51,11 +51,11 @@ Returns the current user's safe profile. Missing, malformed, invalid, or expired
 
 ## Devices
 
-Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the request cannot assign another owner. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Both device code and MQTT client ID must be unique.
+Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the request cannot assign another owner. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Device code and MQTT client ID must be unique.
 
 ### `GET /api/devices` — `ADMIN`, `SECURITY_ANALYST`
 
-Returns the device list sorted by device code, with owner summary and timestamps.
+Returns devices sorted by device code, with owner summary and timestamps.
 
 ### `GET /api/devices/{id}` — `ADMIN`, `SECURITY_ANALYST`
 
@@ -79,7 +79,7 @@ Returns HTTP `201 Created`. Types: `SENSOR`, `CAMERA`, `ACTUATOR`, `GATEWAY`.
 
 ### `PUT /api/devices/{id}` — `ADMIN`
 
-Replaces the device's code and editable details using the same request body as POST. Status and owner are not changed by this endpoint.
+Replaces the device code and editable details using the same request body as POST. Status and owner are not changed by this endpoint.
 
 ### `PATCH /api/devices/{id}/status` — `ADMIN`
 
@@ -97,17 +97,51 @@ Allowed statuses: `ACTIVE`, `INACTIVE`, `BLOCKED`, `REVOKED`.
 
 Returns HTTP `204 No Content` and sets the device to `REVOKED`; the row is retained rather than physically removed.
 
-### Device error responses
+## Policies
 
-- `400`: invalid/missing fields or an invalid enum value.
-- `401`: missing or invalid token.
-- `403`: valid token without the required role.
-- `404`: device ID not found.
-- `409`: duplicate device code or MQTT client ID.
+All policy routes require a bearer token. Reads permit `ADMIN` and `SECURITY_ANALYST`; mutations require `ADMIN`. Subject is normalized to uppercase and resource to lowercase; matching is exact (no wildcards).
 
-The demo database seeds `SENSOR-001` (`ACTIVE`), `CAMERA-001` (`ACTIVE`), and `SENSOR-002` (`BLOCKED`) if they do not already exist. Device status is currently managed and displayed; protected IoT resource decisions that deny blocked/revoked devices are planned for the policy/access-decision phase.
+### `GET /api/policies` — `ADMIN`, `SECURITY_ANALYST`
 
-## Error response
+Returns all policies sorted by name.
+
+### `GET /api/policies/{id}` — `ADMIN`, `SECURITY_ANALYST`
+
+Returns a single policy or `404`.
+
+### `POST /api/policies` — `ADMIN`
+
+Request:
+
+```json
+{
+  "name": "Sensor Read Data Extra",
+  "subject": "SENSOR",
+  "resource": "sensor-data",
+  "action": "READ",
+  "effect": "ALLOW",
+  "enabled": true,
+  "description": "Allow sensors to read sensor data"
+}
+```
+
+Returns HTTP `201 Created`. Policy names are unique. Supported actions: `READ`, `WRITE`, `EXECUTE`; effects: `ALLOW`, `DENY`.
+
+### `PUT /api/policies/{id}` — `ADMIN`
+
+Replaces the policy fields using the same request body as POST.
+
+### `DELETE /api/policies/{id}` — `ADMIN`
+
+Physically removes the policy and returns HTTP `204 No Content`.
+
+## Phase 4 policy evaluation boundary
+
+`PolicyEvaluationService.findApplicablePolicy(subject, resource, action)` selects among enabled exact matches. A matching explicit `DENY` takes precedence over `ALLOW`; otherwise the first matching `ALLOW` is returned. No match returns an empty result. This service is not yet exposed as an access-check endpoint and does not produce an `AccessDecision`; Phase 5 will combine it with authentication, device status, and default DENY.
+
+## Error responses
+
+Validation, authentication, authorization, and application errors use a consistent JSON structure:
 
 ```json
 {
@@ -115,8 +149,10 @@ The demo database seeds `SENSOR-001` (`ACTIVE`), `CAMERA-001` (`ACTIVE`), and `S
   "status": 403,
   "error": "ACCESS_DENIED",
   "message": "You do not have permission to perform this operation",
-  "path": "/api/devices"
+  "path": "/api/policies"
 }
 ```
 
-Policy, access-check, audit, dashboard, and MQTT endpoints are planned but not implemented yet.
+Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role, `404` missing resource, `409` duplicate identifier/name, and `500` unexpected server error.
+
+Access-check, audit, dashboard, and MQTT endpoints are planned but not implemented yet.

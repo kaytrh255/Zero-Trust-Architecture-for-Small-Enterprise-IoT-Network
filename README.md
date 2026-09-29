@@ -12,9 +12,10 @@ Implemented:
 
 - **Phase 1:** Java 21 / Spring Boot foundation, PostgreSQL, Docker Compose, and database-aware health endpoint.
 - **Phase 2:** registration, BCrypt password hashing, JWT login/validation, and protected current-user endpoint.
-- **Phase 3:** device persistence, status management, role-protected device CRUD, and local demo data.
+- **Phase 3:** device persistence, role-protected device CRUD, and status management.
+- **Phase 4:** policy persistence/CRUD, seeded example policies, and deterministic policy selection.
 
-Not implemented yet: Zero Trust resource policies and access decisions, access audit logs, MQTT simulation, and the React dashboard. Device statuses are stored and manageable now, but **blocked/revoked device access is not enforced until the policy/access-decision phase**.
+Not implemented yet: the end-to-end Zero Trust access decision API, access audit logs, MQTT simulation, and React dashboard. Phase 4 can select a matching policy, but policies are not yet enforced on IoT resource requests; Phase 5 will connect identity, device status, resource/action, and default-deny decisions.
 
 ## Requirements
 
@@ -25,24 +26,22 @@ Not implemented yet: Zero Trust resource policies and access decisions, access a
 
 ## Run with Docker Compose
 
-From the repository root, create a local environment file:
+From the repository root, create a local environment file if you do not already have one:
 
 ```bash
 cp .env.example .env
 ```
 
-The template intentionally leaves `JWT_SECRET` empty. Generate a local key with `openssl rand -base64 32` and put it after `JWT_SECRET=` in `.env` before starting Compose.
+The template leaves `JWT_SECRET` empty. Generate a local key with `openssl rand -base64 32` and put it after `JWT_SECRET=` in `.env` before starting Compose. If you already have a `.env` from a previous phase, keep its database/JWT/admin settings; do not overwrite credentials you need to keep.
 
-If you already have a `.env` from Phase 2, keep its database/JWT settings and add the `ADMIN_USERNAME`, `ADMIN_FULL_NAME`, and `ADMIN_PASSWORD` values from `.env.example`. Change the sample admin password for your own demo. If you previously registered `admin` as a normal `USER`, set `ADMIN_USERNAME` to a different name (for example, `zt-admin`); the bootstrap code will not silently promote an existing user.
-
-Start the services:
+Start or rebuild the services:
 
 ```bash
 docker compose up --build -d
 docker compose ps
 ```
 
-Flyway creates the `users` and `devices` tables. At startup the backend creates a bootstrap `ADMIN` account and three demo devices if they do not already exist. The bootstrap password is hashed with BCrypt. Changing `ADMIN_PASSWORD` after the administrator already exists does not reset that account's password.
+Flyway creates/updates the `users`, `devices`, and `policies` tables. The migrations add the three example policies on first application. The backend also bootstraps a local administrator and demo devices if they are missing.
 
 Check the backend and database:
 
@@ -50,38 +49,11 @@ Check the backend and database:
 curl -i http://localhost:8080/actuator/health
 ```
 
-A successful response has HTTP `200`, overall `"status":"UP"`, and a database component such as `"db":{"status":"UP"}`. The backend waits for PostgreSQL's `pg_isready` health check before it starts.
+A successful response has HTTP `200`, overall `"status":"UP"`, and a database component such as `"db":{"status":"UP"}`.
 
-## Configuration
+## Obtain a bearer token
 
-The local `.env` file is ignored by Git. `.env.example` contains local demo values and an empty JWT signing-key placeholder; no actual JWT key is committed.
-
-| Variable | Purpose |
-| --- | --- |
-| `POSTGRES_DB` | Database name |
-| `POSTGRES_ADMIN_PASSWORD` | Local Postgres bootstrap-superuser password |
-| `DB_USERNAME` / `DB_PASSWORD` | Dedicated backend database account |
-| `JWT_SECRET` | HMAC signing key; generate a random value of at least 32 bytes |
-| `JWT_EXPIRATION_SECONDS` | JWT lifetime (default `3600`) |
-| `ADMIN_USERNAME` / `ADMIN_FULL_NAME` | Initial administrator identity |
-| `ADMIN_PASSWORD` | Initial administrator password; used only when that account is first created |
-| `POSTGRES_PORT` / `BACKEND_PORT` | Host ports (defaults `5432` / `8080`) |
-
-## Demonstrate authentication and device authorization
-
-### 1. Register a regular user
-
-```bash
-curl -i -X POST http://localhost:8080/api/auth/register \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"student1","password":"StudentPass123!","fullName":"Student One"}'
-```
-
-Expected status: `201 Created`. Public registration always assigns `USER`; the request cannot select `ADMIN`.
-
-### 2. Log in as the bootstrap administrator
-
-Use the `ADMIN_USERNAME` and `ADMIN_PASSWORD` values from your `.env`:
+Log in with the bootstrap administrator configured in `.env` and copy `accessToken` from the response:
 
 ```bash
 curl -i -X POST http://localhost:8080/api/auth/login \
@@ -89,50 +61,55 @@ curl -i -X POST http://localhost:8080/api/auth/login \
   -d '{"username":"admin","password":"YOUR_ADMIN_PASSWORD"}'
 ```
 
-Copy `accessToken` from the response. It is a bearer token with a configured expiry.
+If you changed `ADMIN_USERNAME`, use that value instead of `admin`. You can also register a normal user with `POST /api/auth/register`; public registration always assigns `USER`.
 
-### 3. List the demo devices
+## Policy API (Phase 4)
 
-Replace `PASTE_ADMIN_TOKEN_HERE` with the login token:
+All policy routes require a valid JWT. `ADMIN` can read and manage policies; `SECURITY_ANALYST` can read them. Public registration creates only `USER` accounts.
+
+### List policies
 
 ```bash
-curl -i http://localhost:8080/api/devices \
+curl -i http://localhost:8080/api/policies \
   -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
 ```
 
-On a fresh database, the list contains `SENSOR-001` (`ACTIVE`), `CAMERA-001` (`ACTIVE`), and `SENSOR-002` (`BLOCKED`). The device IDs are returned in the response; use the appropriate ID in the following requests.
+The seeded policies are:
 
-### 4. Change a device status
+- `Sensor Read Data`: `SENSOR`, `sensor-data`, `READ`, `ALLOW`
+- `Camera Read Stream`: `CAMERA`, `camera-stream`, `READ`, `ALLOW`
+- `Sensor Cannot Write Camera`: `SENSOR`, `camera-stream`, `WRITE`, `DENY`
+
+### Create a policy
 
 ```bash
-curl -i -X PATCH http://localhost:8080/api/devices/1/status \
+curl -i -X POST http://localhost:8080/api/policies \
   -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE' \
   -H 'Content-Type: application/json' \
-  -d '{"status":"BLOCKED"}'
+  -d '{"name":"Sensor Read Data Extra","subject":"SENSOR","resource":"sensor-data","action":"READ","effect":"ALLOW","enabled":true,"description":"Allow sensors to read sensor data"}'
 ```
 
-Expected status: `200 OK`, with the updated device returned. Valid statuses are `ACTIVE`, `INACTIVE`, `BLOCKED`, and `REVOKED`.
+Use a new policy name for this example because the seeded name is already present; for example, `Sensor Read Data Extra`. Actions are `READ`, `WRITE`, `EXECUTE`; effects are `ALLOW`, `DENY`. The response contains the policy ID, which can be used for `GET /api/policies/{id}`, `PUT /api/policies/{id}`, and `DELETE /api/policies/{id}`.
 
-### 5. Verify role restrictions
+A regular `USER` token receives `403 Forbidden` for the policy list. Duplicate policy names return `409`; invalid fields return `400`; missing IDs return `404`.
 
-Log in as `student1` and call `GET /api/devices` with that user's token. Expected status: `403 Forbidden`. The list/detail operations allow `ADMIN` and `SECURITY_ANALYST`; create/update/status-change/delete operations require `ADMIN`.
+## What the Phase 4 policy evaluator does
 
-`DELETE /api/devices/{id}` intentionally marks a device `REVOKED` instead of physically deleting the row, preserving its identity for later audit/history work.
+`PolicyEvaluationService` retrieves enabled policies matching the exact subject, resource, and action. An explicit matching `DENY` is selected before a matching `ALLOW`; if there is no match, the service returns no policy. Phase 5 will turn that result into an `AccessDecision` and apply default DENY to protected requests. **There is not yet a public `/api/access/check` endpoint, and a stored policy does not itself grant or block IoT traffic in this phase.**
 
 ## Authentication and device design
 
 - `POST /api/auth/register` validates input, normalizes usernames, hashes passwords with BCrypt, and assigns `USER` by default.
-- `POST /api/auth/login` uses Spring Security's `AuthenticationManager` and `DaoAuthenticationProvider`; successful login returns a signed JWT.
-- `JwtAuthenticationFilter` validates token signature and expiry, then reloads the user's current role and enabled status from PostgreSQL.
-- The API is stateless. The JWT signing key is supplied through `JWT_SECRET`, not Java source code.
-- Device creation assigns the authenticated administrator as owner. Device code and MQTT client ID are unique. Flyway migration `V2__create_devices.sql` creates the device table.
-- Hibernate uses `ddl-auto: validate`; Flyway owns schema creation.
+- `POST /api/auth/login` uses Spring Security's `AuthenticationManager` and `DaoAuthenticationProvider` to return a signed JWT.
+- `JwtAuthenticationFilter` validates token signature/expiry and reloads the account's current role and enabled state from PostgreSQL.
+- Device reads allow `ADMIN` and `SECURITY_ANALYST`; device changes require `ADMIN`. Device owner is assigned from the authenticated admin. `DELETE /api/devices/{id}` marks the device `REVOKED` rather than deleting it.
+- The `devices` and `policies` tables are created by Flyway migrations V2 and V3. Hibernate uses `ddl-auto: validate`.
 
-The `users` table stores `password_hash`, never plaintext passwords. The `devices` table stores device identity, type, network address, MQTT client ID, current status, owner, creation time, and last-seen time. `lastSeenAt` remains empty until telemetry integration is implemented.
+The `users` table stores `password_hash`, never plaintext passwords. Device status is stored and manageable, but its effect on IoT access is not enforced until Phase 5.
 
 ## Error handling
 
-REST validation and application errors use JSON with timestamp, HTTP status, error code, message, and request path. Missing/invalid authentication returns `401`; an authenticated role lacking access returns `403`; duplicate identifiers return `409`; missing records return `404`.
+REST validation and application errors use JSON with timestamp, HTTP status, error code, message, and request path. Missing/invalid authentication returns `401`; an authenticated role lacking access returns `403`; duplicate names/identifiers return `409`; missing records return `404`.
 
 ## Useful commands
 
@@ -148,7 +125,7 @@ Stop services while retaining database data:
 docker compose down
 ```
 
-Reset the local database volume as well:
+Reset the local database volume as well (this deletes local data):
 
 ```bash
 docker compose down -v
@@ -178,12 +155,14 @@ mvn test
 │   │   ├── dto/
 │   │   ├── entity/
 │   │   ├── exception/
+│   │   ├── policy/
 │   │   ├── repository/
 │   │   ├── security/
 │   │   └── service/
 │   ├── src/main/resources/db/migration/
 │   │   ├── V1__create_users.sql
-│   │   └── V2__create_devices.sql
+│   │   ├── V2__create_devices.sql
+│   │   └── V3__create_policies.sql
 │   ├── src/test/java/com/yak/zerotrust/
 │   ├── Dockerfile
 │   └── pom.xml
