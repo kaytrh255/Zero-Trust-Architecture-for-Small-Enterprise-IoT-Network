@@ -20,6 +20,13 @@ security:
     secret: ${JWT_SECRET}
     expiration-seconds: ${JWT_EXPIRATION_SECONDS:3600}
 
+app:
+  bootstrap:
+    admin:
+      username: ${ADMIN_USERNAME:admin}
+      full-name: ${ADMIN_FULL_NAME:Zero Trust Administrator}
+      password: ${ADMIN_PASSWORD}
+
 management:
   endpoints:
     web:

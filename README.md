@@ -11,16 +11,17 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. The p
 Implemented:
 
 - **Phase 1:** Java 21 / Spring Boot foundation, PostgreSQL, Docker Compose, and database-aware health endpoint.
-- **Phase 2:** user registration, BCrypt password hashing, JWT login/validation, and a protected current-user endpoint.
+- **Phase 2:** registration, BCrypt password hashing, JWT login/validation, and protected current-user endpoint.
+- **Phase 3:** device persistence, status management, role-protected device CRUD, and local demo data.
 
-Not implemented yet: device management, the Zero Trust policy engine, access decisions, audit logs, MQTT simulation, and the React dashboard. Do not treat this authentication phase as the complete Zero Trust system.
+Not implemented yet: Zero Trust resource policies and access decisions, access audit logs, MQTT simulation, and the React dashboard. Device statuses are stored and manageable now, but **blocked/revoked device access is not enforced until the policy/access-decision phase**.
 
 ## Requirements
 
 - Docker Engine / Docker Desktop
 - Docker Compose v2 (`docker compose`)
 - `curl` (PowerShell users can use `curl.exe`)
-- Optional for running tests directly: Java 21 and Maven 3.9+
+- Optional for unit tests directly: Java 21 and Maven 3.9+
 
 ## Run with Docker Compose
 
@@ -30,7 +31,9 @@ From the repository root, create a local environment file:
 cp .env.example .env
 ```
 
-The template intentionally leaves `JWT_SECRET` empty. Generate a local key with `openssl rand -base64 32` and put the result after `JWT_SECRET=` in `.env` before starting Compose. If you already have a `.env` from Phase 1, keep its database settings and add `JWT_SECRET` and `JWT_EXPIRATION_SECONDS` from `.env.example`; do not overwrite credentials that you need to keep.
+The template intentionally leaves `JWT_SECRET` empty. Generate a local key with `openssl rand -base64 32` and put it after `JWT_SECRET=` in `.env` before starting Compose.
+
+If you already have a `.env` from Phase 2, keep its database/JWT settings and add the `ADMIN_USERNAME`, `ADMIN_FULL_NAME`, and `ADMIN_PASSWORD` values from `.env.example`. Change the sample admin password for your own demo. If you previously registered `admin` as a normal `USER`, set `ADMIN_USERNAME` to a different name (for example, `zt-admin`); the bootstrap code will not silently promote an existing user.
 
 Start the services:
 
@@ -39,7 +42,9 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Flyway creates the `users` table when the backend starts. To check the backend and database:
+Flyway creates the `users` and `devices` tables. At startup the backend creates a bootstrap `ADMIN` account and three demo devices if they do not already exist. The bootstrap password is hashed with BCrypt. Changing `ADMIN_PASSWORD` after the administrator already exists does not reset that account's password.
+
+Check the backend and database:
 
 ```bash
 curl -i http://localhost:8080/actuator/health
@@ -49,22 +54,22 @@ A successful response has HTTP `200`, overall `"status":"UP"`, and a database co
 
 ## Configuration
 
-The local `.env` file is ignored by Git. `.env.example` contains local demo database values and an empty `JWT_SECRET` placeholder; no actual signing key is committed.
+The local `.env` file is ignored by Git. `.env.example` contains local demo values and an empty JWT signing-key placeholder; no actual JWT key is committed.
 
 | Variable | Purpose |
 | --- | --- |
 | `POSTGRES_DB` | Database name |
 | `POSTGRES_ADMIN_PASSWORD` | Local Postgres bootstrap-superuser password |
 | `DB_USERNAME` / `DB_PASSWORD` | Dedicated backend database account |
-| `JWT_SECRET` | HMAC signing key; set a random value of at least 32 bytes |
+| `JWT_SECRET` | HMAC signing key; generate a random value of at least 32 bytes |
 | `JWT_EXPIRATION_SECONDS` | JWT lifetime (default `3600`) |
+| `ADMIN_USERNAME` / `ADMIN_FULL_NAME` | Initial administrator identity |
+| `ADMIN_PASSWORD` | Initial administrator password; used only when that account is first created |
 | `POSTGRES_PORT` / `BACKEND_PORT` | Host ports (defaults `5432` / `8080`) |
 
-## Demonstrate registration and JWT authentication
+## Demonstrate authentication and device authorization
 
-The examples below use a local demo password. Use your own value when testing.
-
-### 1. Register a user
+### 1. Register a regular user
 
 ```bash
 curl -i -X POST http://localhost:8080/api/auth/register \
@@ -72,44 +77,62 @@ curl -i -X POST http://localhost:8080/api/auth/register \
   -d '{"username":"student1","password":"StudentPass123!","fullName":"Student One"}'
 ```
 
-Expected status: `201 Created`. The response contains the user profile and role `USER`, but never the password or its hash. The public registration API does not accept a role, so a caller cannot register themselves as `ADMIN`.
+Expected status: `201 Created`. Public registration always assigns `USER`; the request cannot select `ADMIN`.
 
-### 2. Log in and copy the access token
+### 2. Log in as the bootstrap administrator
+
+Use the `ADMIN_USERNAME` and `ADMIN_PASSWORD` values from your `.env`:
 
 ```bash
 curl -i -X POST http://localhost:8080/api/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"student1","password":"StudentPass123!"}'
+  -d '{"username":"admin","password":"YOUR_ADMIN_PASSWORD"}'
 ```
 
-The response includes `accessToken`, `tokenType` (`Bearer`), `expiresInSeconds`, and the user profile. Copy the `accessToken` value for the next request.
+Copy `accessToken` from the response. It is a bearer token with a configured expiry.
 
-### 3. Call the protected endpoint
+### 3. List the demo devices
 
-Replace `PASTE_ACCESS_TOKEN_HERE` with the token returned by login:
+Replace `PASTE_ADMIN_TOKEN_HERE` with the login token:
 
 ```bash
-curl -i http://localhost:8080/api/auth/me \
-  -H 'Authorization: Bearer PASTE_ACCESS_TOKEN_HERE'
+curl -i http://localhost:8080/api/devices \
+  -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
 ```
 
-A valid token returns the current user's profile. Calling `/api/auth/me` without a token, with a malformed token, or with an expired token returns `401 Unauthorized` as JSON. Login with an incorrect username/password also returns `401`; invalid request fields return `400`; duplicate usernames return `409`.
+On a fresh database, the list contains `SENSOR-001` (`ACTIVE`), `CAMERA-001` (`ACTIVE`), and `SENSOR-002` (`BLOCKED`). The device IDs are returned in the response; use the appropriate ID in the following requests.
 
-The health endpoint and the registration/login endpoints are public. All other routes currently require a valid bearer token. Role authorities are loaded from the database, but role-restricted management routes are introduced in later phases.
+### 4. Change a device status
 
-## Authentication design (Phase 2)
+```bash
+curl -i -X PATCH http://localhost:8080/api/devices/1/status \
+  -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE' \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"BLOCKED"}'
+```
+
+Expected status: `200 OK`, with the updated device returned. Valid statuses are `ACTIVE`, `INACTIVE`, `BLOCKED`, and `REVOKED`.
+
+### 5. Verify role restrictions
+
+Log in as `student1` and call `GET /api/devices` with that user's token. Expected status: `403 Forbidden`. The list/detail operations allow `ADMIN` and `SECURITY_ANALYST`; create/update/status-change/delete operations require `ADMIN`.
+
+`DELETE /api/devices/{id}` intentionally marks a device `REVOKED` instead of physically deleting the row, preserving its identity for later audit/history work.
+
+## Authentication and device design
 
 - `POST /api/auth/register` validates input, normalizes usernames, hashes passwords with BCrypt, and assigns `USER` by default.
-- `POST /api/auth/login` uses Spring Security's `AuthenticationManager` and `DaoAuthenticationProvider` to compare the submitted password with its BCrypt hash. Successful login returns a signed JWT.
-- `JwtAuthenticationFilter` validates the token signature and expiry on protected requests, then reloads the user's current role and enabled status from PostgreSQL. Disabled or deleted accounts cannot continue using an otherwise valid token.
-- The API is stateless: no server-side login session is created. The JWT signing key is read from `JWT_SECRET`; it is not stored in source code.
-- Flyway migration `V1__create_users.sql` creates the `users` table. Hibernate is set to `validate`, not to create tables automatically.
+- `POST /api/auth/login` uses Spring Security's `AuthenticationManager` and `DaoAuthenticationProvider`; successful login returns a signed JWT.
+- `JwtAuthenticationFilter` validates token signature and expiry, then reloads the user's current role and enabled status from PostgreSQL.
+- The API is stateless. The JWT signing key is supplied through `JWT_SECRET`, not Java source code.
+- Device creation assigns the authenticated administrator as owner. Device code and MQTT client ID are unique. Flyway migration `V2__create_devices.sql` creates the device table.
+- Hibernate uses `ddl-auto: validate`; Flyway owns schema creation.
 
-The user table stores `password_hash`, never plaintext passwords. It also stores username, full name, role, enabled status, and timestamps. Authentication failures are not yet written to an audit table; audit logging comes in a later phase.
+The `users` table stores `password_hash`, never plaintext passwords. The `devices` table stores device identity, type, network address, MQTT client ID, current status, owner, creation time, and last-seen time. `lastSeenAt` remains empty until telemetry integration is implemented.
 
 ## Error handling
 
-REST validation and application errors use a JSON structure with timestamp, HTTP status, error code, message, and request path. Security failures return `401` or `403` without exposing internal details.
+REST validation and application errors use JSON with timestamp, HTTP status, error code, message, and request path. Missing/invalid authentication returns `401`; an authenticated role lacking access returns `403`; duplicate identifiers return `409`; missing records return `404`.
 
 ## Useful commands
 
@@ -119,7 +142,7 @@ View service logs:
 docker compose logs -f backend postgres
 ```
 
-Stop the services while retaining database data:
+Stop services while retaining database data:
 
 ```bash
 docker compose down
@@ -131,7 +154,7 @@ Reset the local database volume as well:
 docker compose down -v
 ```
 
-Run the unit tests directly (requires Java 21 and Maven):
+Run unit tests directly (requires Java 21 and Maven):
 
 ```bash
 cd backend
@@ -151,24 +174,20 @@ mvn test
 .
 ├── backend/
 │   ├── src/main/java/com/yak/zerotrust/
-│   │   ├── controller/AuthController.java
+│   │   ├── controller/
 │   │   ├── dto/
-│   │   ├── entity/UserAccount.java
+│   │   ├── entity/
 │   │   ├── exception/
-│   │   ├── repository/UserRepository.java
+│   │   ├── repository/
 │   │   ├── security/
-│   │   └── service/AuthService.java
-│   ├── src/main/resources/
-│   │   ├── application.yml
-│   │   └── db/migration/V1__create_users.sql
-│   ├── src/test/java/com/yak/zerotrust/security/
+│   │   └── service/
+│   ├── src/main/resources/db/migration/
+│   │   ├── V1__create_users.sql
+│   │   └── V2__create_devices.sql
+│   ├── src/test/java/com/yak/zerotrust/
 │   ├── Dockerfile
 │   └── pom.xml
 ├── docs/
-│   ├── SDD.md
-│   ├── architecture.md
-│   ├── api.md
-│   └── security-model.md
 ├── postgres/init/01-create-app-user.sh
 ├── docker-compose.yml
 ├── .env.example

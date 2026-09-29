@@ -2,7 +2,7 @@
 
 ## Architectural style
 
-The project is a modular monolith: one Spring Boot application owns HTTP APIs, authentication, persistence, and (in later phases) policy evaluation and auditing. PostgreSQL is the only application database. Docker Compose runs the backend and database for local development.
+The project is a modular monolith: one Spring Boot application owns REST APIs, authentication, device management, persistence, and (in later phases) policy evaluation and auditing. PostgreSQL is the only application database. Docker Compose runs the backend and database for local development.
 
 ## Current deployment
 
@@ -12,42 +12,27 @@ Postman / curl
       | HTTP on 127.0.0.1:8080
       v
 Spring Boot application
-  ├── Authentication API
-  ├── Spring Security filter chain
-  ├── JWT validation
-  ├── AuthService
-  ├── JPA repositories
-  └── Flyway migrations
+  ├── AuthController / AuthService
+  ├── Spring Security filter chain / JWT validation
+  ├── DeviceController / DeviceService
+  ├── repositories / Flyway migrations
+  └── demo administrator and device initializer
       |
       | JDBC as a non-superuser application role
       v
 PostgreSQL (Docker volume)
 ```
 
-## Phase 1 and 2 request paths
+## Phase 1–3 request paths
 
-Registration:
-
-```text
-POST /api/auth/register
-  -> Bean Validation
-  -> normalize username
-  -> BCrypt encode password
-  -> UserRepository
-  -> PostgreSQL users table
-  -> return a safe user profile (no password hash)
-```
-
-Login:
+Registration and login:
 
 ```text
-POST /api/auth/login
-  -> AuthenticationManager
-  -> DaoAuthenticationProvider
-  -> JpaUserDetailsService / UserRepository
-  -> BCrypt password comparison
-  -> JwtService signs token
-  -> return bearer token and user profile
+POST /api/auth/register or /api/auth/login
+  -> validate request
+  -> BCrypt encode or verify password
+  -> UserRepository / PostgreSQL users table
+  -> for successful login, JwtService signs token
 ```
 
 Protected request:
@@ -55,14 +40,27 @@ Protected request:
 ```text
 Authorization: Bearer <JWT>
   -> JwtAuthenticationFilter verifies signature and expiry
-  -> reload current account and role from PostgreSQL
-  -> reject disabled/missing account or invalid token
+  -> reload current user, role, and enabled state from PostgreSQL
   -> SecurityFilterChain requires authentication
-  -> controller handles request
+  -> method security checks the endpoint role
+  -> controller / service handles the request
 ```
 
-The only protected application endpoint in Phase 2 is `GET /api/auth/me`. Role-specific administrative routes, the Zero Trust policy engine, audit module, MQTT, and React UI are future phases, not part of this current architecture.
+Device creation:
 
-## Persistence
+```text
+POST /api/devices (ADMIN token)
+  -> method security requires ROLE_ADMIN
+  -> validate unique device code and MQTT client ID
+  -> associate current administrator as owner
+  -> DeviceRepository / PostgreSQL devices table
+  -> return DeviceResponse
+```
 
-Flyway runs `V1__create_users.sql` at startup. Hibernate uses `ddl-auto: validate`, so the migration—not automatic ORM schema generation—defines the database table. The backend uses a dedicated non-superuser PostgreSQL account created by the Postgres initialization script.
+Device status update uses `PATCH /api/devices/{id}/status`; the controller requires `ADMIN`. Deleting a device sets its status to `REVOKED` rather than physically deleting its record.
+
+## Persistence and bootstrap
+
+Flyway migrations `V1__create_users.sql` and `V2__create_devices.sql` define the schema. Hibernate uses `ddl-auto: validate`. At startup a configured bootstrap admin is created only if absent, and demo devices are inserted only if not already present. A configured username already owned by a non-admin causes startup to fail rather than silently elevating that account.
+
+The current implementation stores device states and enforces user roles on management APIs. It does not yet evaluate IoT resource access based on device state; that is a later policy/access-decision phase.

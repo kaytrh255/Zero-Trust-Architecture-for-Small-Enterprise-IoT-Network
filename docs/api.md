@@ -1,12 +1,12 @@
 # API specification (implemented endpoints)
 
-Base URL for local Compose: `http://localhost:8080`. JSON is used for request and response bodies. The health endpoint is public; register and login are public; `GET /api/auth/me` requires a bearer token.
+Base URL for local Compose: `http://localhost:8080`. JSON is used for request and response bodies. Health, registration, and login are public. All other routes require a bearer token.
 
 ## Health
 
-### `GET /actuator/health`
+### `GET /actuator/health` — public
 
-Returns application health and the database status. Successful response: HTTP `200`, overall `UP`, and `components.db.status` equal to `UP`.
+Returns application health and database status. Successful response: HTTP `200`, overall `UP`, and `components.db.status` equal to `UP`.
 
 ## Authentication
 
@@ -37,24 +37,7 @@ Request:
 }
 ```
 
-Successful response: HTTP `200 OK`:
-
-```json
-{
-  "accessToken": "<signed JWT>",
-  "tokenType": "Bearer",
-  "expiresInSeconds": 3600,
-  "user": {
-    "id": 1,
-    "username": "student1",
-    "fullName": "Student One",
-    "role": "USER",
-    "enabled": true
-  }
-}
-```
-
-Wrong credentials return `401 Unauthorized` with a generic message.
+Successful response: HTTP `200 OK` with `accessToken`, `tokenType` (`Bearer`), `expiresInSeconds`, and a safe user profile. Wrong credentials return `401 Unauthorized` with a generic message.
 
 ### `GET /api/auth/me` — authenticated
 
@@ -66,20 +49,74 @@ Authorization: Bearer <accessToken>
 
 Returns the current user's safe profile. Missing, malformed, invalid, or expired tokens return `401 Unauthorized`.
 
-## Error response
+## Devices
 
-Validation, authentication, and application errors use this structure:
+Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the request cannot assign another owner. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Both device code and MQTT client ID must be unique.
+
+### `GET /api/devices` — `ADMIN`, `SECURITY_ANALYST`
+
+Returns the device list sorted by device code, with owner summary and timestamps.
+
+### `GET /api/devices/{id}` — `ADMIN`, `SECURITY_ANALYST`
+
+Returns one device, or `404` if the ID does not exist.
+
+### `POST /api/devices` — `ADMIN`
+
+Request:
+
+```json
+{
+  "deviceCode": "SENSOR-003",
+  "deviceName": "Temperature Sensor 3",
+  "deviceType": "SENSOR",
+  "ipAddress": "192.168.10.24",
+  "mqttClientId": "SENSOR-003"
+}
+```
+
+Returns HTTP `201 Created`. Types: `SENSOR`, `CAMERA`, `ACTUATOR`, `GATEWAY`.
+
+### `PUT /api/devices/{id}` — `ADMIN`
+
+Replaces the device's code and editable details using the same request body as POST. Status and owner are not changed by this endpoint.
+
+### `PATCH /api/devices/{id}/status` — `ADMIN`
+
+Request:
+
+```json
+{
+  "status": "BLOCKED"
+}
+```
+
+Allowed statuses: `ACTIVE`, `INACTIVE`, `BLOCKED`, `REVOKED`.
+
+### `DELETE /api/devices/{id}` — `ADMIN`
+
+Returns HTTP `204 No Content` and sets the device to `REVOKED`; the row is retained rather than physically removed.
+
+### Device error responses
+
+- `400`: invalid/missing fields or an invalid enum value.
+- `401`: missing or invalid token.
+- `403`: valid token without the required role.
+- `404`: device ID not found.
+- `409`: duplicate device code or MQTT client ID.
+
+The demo database seeds `SENSOR-001` (`ACTIVE`), `CAMERA-001` (`ACTIVE`), and `SENSOR-002` (`BLOCKED`) if they do not already exist. Device status is currently managed and displayed; protected IoT resource decisions that deny blocked/revoked devices are planned for the policy/access-decision phase.
+
+## Error response
 
 ```json
 {
   "timestamp": "2026-09-28T10:00:00Z",
-  "status": 401,
-  "error": "UNAUTHORIZED",
-  "message": "Authentication is required or the bearer token is invalid or expired",
-  "path": "/api/auth/me"
+  "status": 403,
+  "error": "ACCESS_DENIED",
+  "message": "You do not have permission to perform this operation",
+  "path": "/api/devices"
 }
 ```
 
-Implemented status codes include `400` validation/request errors, `401` authentication failures, `403` authorization failures, `404` missing resources, `409` duplicate usernames/unique values, and `500` unexpected server errors.
-
-Device, policy, access-check, audit, and dashboard endpoints are planned but not implemented yet.
+Policy, access-check, audit, dashboard, and MQTT endpoints are planned but not implemented yet.

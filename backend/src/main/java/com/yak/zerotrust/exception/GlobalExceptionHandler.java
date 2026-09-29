@@ -8,6 +8,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
 import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -32,12 +33,25 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.CONFLICT, "CONFLICT", exception.getMessage(), request);
     }
 
+    @ExceptionHandler(DeviceConflictException.class)
+    public ResponseEntity<ApiError> handleDeviceConflict(
+            DeviceConflictException exception,
+            HttpServletRequest request
+    ) {
+        return error(HttpStatus.CONFLICT, "CONFLICT", exception.getMessage(), request);
+    }
+
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<ApiError> handleDataConflict(
             DataIntegrityViolationException exception,
             HttpServletRequest request
     ) {
         return error(HttpStatus.CONFLICT, "CONFLICT", "A record with the same unique value already exists", request);
+    }
+
+    @ExceptionHandler({DeviceNotFoundException.class, UserNotFoundException.class})
+    public ResponseEntity<ApiError> handleMissingEntity(HttpServletRequest request) {
+        return error(HttpStatus.NOT_FOUND, "NOT_FOUND", "Requested resource was not found", request);
     }
 
     @ExceptionHandler({NoHandlerFoundException.class, NoResourceFoundException.class})
@@ -60,6 +74,11 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ApiError> handleUnreadableBody(HttpServletRequest request) {
         return error(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "Request body is missing or invalid", request);
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiError> handleAccessDenied(HttpServletRequest request) {
+        return error(HttpStatus.FORBIDDEN, "ACCESS_DENIED", "You do not have permission to perform this operation", request);
     }
 
     @ExceptionHandler(AuthenticationException.class)

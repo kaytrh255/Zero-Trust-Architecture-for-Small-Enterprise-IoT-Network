@@ -1,34 +1,29 @@
 # Security model (current implementation)
 
-## Implemented in Phase 2
+## Passwords and authentication
 
-### Passwords
+`AuthService` hashes passwords with Spring Security's `BCryptPasswordEncoder` before persistence. The `users.password_hash` column stores only the BCrypt hash. Registration and profile responses never expose the hash. Incorrect and unknown login credentials return the same generic response.
 
-`AuthService` encodes passwords with Spring Security's `BCryptPasswordEncoder` before persistence. The `users.password_hash` column stores only the BCrypt hash. Registration and profile responses never expose the hash.
+`POST /api/auth/login` delegates to an `AuthenticationManager` backed by `DaoAuthenticationProvider`. A successful login creates a signed JWT with subject, issue time, and expiry. The key comes from `JWT_SECRET`; `JWT_EXPIRATION_SECONDS` controls token lifetime. Login responses use `Cache-Control: no-store`.
 
-### Authentication
+`JwtAuthenticationFilter` verifies the JWT signature and expiry, then reloads the account from PostgreSQL on protected requests. Disabled or deleted accounts cannot continue using an otherwise valid token; current roles are loaded from the database rather than trusted from a client-supplied claim. The API is stateless and does not create a server-side login session.
 
-`POST /api/auth/login` delegates to an `AuthenticationManager` backed by `DaoAuthenticationProvider`. The provider loads the account from PostgreSQL and checks the submitted password against the BCrypt hash. Unknown usernames and incorrect passwords receive the same generic response.
+## Role-based device management
 
-### JWTs
+The bootstrap administrator is created from `ADMIN_USERNAME`, `ADMIN_FULL_NAME`, and `ADMIN_PASSWORD`. The password is BCrypt-hashed. Bootstrap runs only when that username is absent; it never promotes an existing `USER` account. Public registration cannot submit a role and always assigns `USER`.
 
-A successful login creates a signed JWT with a subject, issue time, and expiry. The signing key is supplied through `JWT_SECRET`; it is not embedded in Java source. `JWT_EXPIRATION_SECONDS` controls token lifetime. The login response is marked `Cache-Control: no-store`. The API is stateless and does not create an HTTP login session.
+- `ADMIN`: list/read/create/update/change status/revoke devices.
+- `SECURITY_ANALYST`: list/read devices.
+- `USER` and `DEVICE`: no access to the device-management endpoints in this phase.
 
-`JwtAuthenticationFilter` verifies the signature and expiry for bearer tokens. It reloads the account from PostgreSQL on protected requests, so account disablement and role changes take effect without waiting for the token to expire. Missing, invalid, malformed, and expired tokens do not establish an authenticated principal.
+Method-level rules are in `DeviceController` using `@PreAuthorize`; they are enabled by `@EnableMethodSecurity`. Device owner is assigned from the authenticated administrator, not from request input. `DELETE` sets `REVOKED` to preserve the device identity for future audit history.
 
-### Registration and roles
+## Device status boundary
 
-Public registration accepts username, password, and full name only. The server assigns `USER` regardless of client input; this prevents self-assignment of `ADMIN`. The principal exposes the database role as a Spring Security authority (`ROLE_<role>`). Role-specific management rules will be added with the relevant later modules.
+`ACTIVE`, `INACTIVE`, `BLOCKED`, and `REVOKED` are persisted and returned by the Device API. The access-check/policy engine does not exist yet, so this phase does **not** claim that a `BLOCKED` or `REVOKED` device is denied access to an IoT resource. That enforcement is scheduled for the Zero Trust decision phase.
 
-### Transport and errors
+## Transport, errors, and limits
 
-CSRF protection is disabled because this phase uses stateless bearer tokens in the `Authorization` header rather than browser cookies; no server-side session is created. Docker Compose binds published ports to loopback for local development. TLS is not implemented, and local HTTP must not be presented as HTTPS. Health details are limited to component statuses. Authentication and authorization failures return JSON without stack traces or database details.
+CSRF is disabled because the API uses stateless bearer tokens in the `Authorization` header rather than browser cookies. Docker Compose binds published ports to loopback for local development. TLS is not implemented; local HTTP must not be described as HTTPS. Health details are limited to component statuses. Authentication and authorization failures return JSON without stack traces or database details.
 
-## Not implemented yet
-
-- Authorization by Zero Trust resource/action policy, device status, or request context.
-- Access/audit logs, including invalid-login auditing.
-- Token refresh, logout/revocation list, MFA, rate limiting, or brute-force protection.
-- TLS for HTTP or MQTT, production secret management, and deployment hardening.
-
-These limitations are intentional for the current student prototype stage; later documentation and demonstrations must not claim these controls exist before implementation.
+Not implemented: Zero Trust resource/action policies, access audit logs, device credentials, JWT refresh/logout/revocation list, MFA, rate limiting, brute-force protection, TLS, or production secret management.
