@@ -102,6 +102,10 @@ public class Device {
         this.status = status;
     }
 
+    public void recordTelemetryReceived(Instant receivedAt) {
+        this.lastSeenAt = receivedAt;
+    }
+
     public Long getId() {
         return id;
     }

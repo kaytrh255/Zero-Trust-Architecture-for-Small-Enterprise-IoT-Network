@@ -2,22 +2,24 @@
 
 ## Architectural style
 
-The project is a modular monolith: one Spring Boot application owns REST APIs, authentication, device and policy management, persistence, and (in later phases) final access decisions and auditing. PostgreSQL is the only application database. Docker Compose runs the backend and database for local development.
+The project is a modular monolith: one Spring Boot application owns REST APIs, authentication, device and policy management, access decisions, audits, and MQTT telemetry ingestion. PostgreSQL is the application database. Docker Compose runs PostgreSQL, a local Mosquitto broker, and the backend.
 
-## Current deployment
+## Local deployment
 
 ```text
-Postman / curl
-      |
-      | HTTP on 127.0.0.1:8080
-      v
-Spring Boot application
-  ├── AuthController / AuthService
-  ├── Spring Security filter chain / JWT validation
+curl / Postman                  Simulated IoT publisher
+      |                                   |
+      | HTTP + bearer JWT                 | MQTT + shared local credential
+      v                                   v
+Spring Boot application <----------> Mosquitto (127.0.0.1:1883)
+  ├── AuthController / AuthService            └── iot/telemetry/{deviceCode}
+  ├── JwtAuthenticationFilter
   ├── DeviceController / DeviceService
-  ├── PolicyController / PolicyService / PolicyEvaluationService
+  ├── PolicyController / PolicyService
+  ├── AccessController / ZeroTrustDecisionService
+  ├── AccessAuditService / TelemetryIngestionService
   ├── repositories / Flyway migrations
-  └── bootstrap administrator and demo devices
+  └── TelemetryQueryService
       |
       | JDBC as a non-superuser application role
       v
@@ -34,19 +36,34 @@ POST /api/auth/register or /api/auth/login
   -> on successful login, JwtService signs a token
 ```
 
-Protected HTTP requests pass through `JwtAuthenticationFilter`, which validates signature and expiry and reloads current user role/enabled status from PostgreSQL. `SecurityConfig` requires authentication for non-public routes; method-level rules protect device and policy operations.
+Protected HTTP requests pass through `JwtAuthenticationFilter`, which validates signature and expiry and reloads current user role/enabled state from PostgreSQL. `SecurityConfig` requires authentication for non-public routes; method-level rules protect management, audit, and telemetry reads.
 
-## Policy management and selection
+## Access decision path
 
 ```text
-POST/PUT/DELETE /api/policies (ADMIN)
-  -> PolicyController role check
-  -> PolicyService validation and normalization
-  -> PolicyRepository / PostgreSQL policies table
+POST /api/access/check (valid bearer JWT)
+  -> requester identity/role from UserPrincipal; body gives deviceCode/resource/action
+  -> ZeroTrustDecisionService locks and loads registered device
+  -> reject role mismatch, unknown device, or non-ACTIVE device
+  -> PolicyEvaluationService: exact enabled match; explicit DENY before ALLOW
+  -> no match => DENY
+  -> AccessAuditService writes decision and snapshots
+  -> return AccessDecision with audit ID
 ```
 
-`PolicyEvaluationService` queries enabled policies for an exact subject/resource/action match. Explicit `DENY` takes priority over `ALLOW`; no match returns an empty policy result. This is a policy selector, not yet the complete Zero Trust access-decision flow. Phase 5 will wrap the result in an `AccessDecision`, verify request identity and device status, apply default DENY, and expose the demonstration access-check endpoint.
+The API returns a policy decision for the demo request; it is not a reverse proxy or general enforcement layer for arbitrary IoT services. Access checks are attributed to the authenticated user. Policy subject and device state come from the registered device, not the request payload. API requester roles `USER` and `DEVICE` are evaluated; management roles get a recorded business DENY.
+
+## MQTT telemetry path
+
+```text
+publisher -> authenticated local Mosquitto -> Paho subscriber
+  -> validate topic/payload -> derive device code from topic
+  -> ZeroTrustDecisionService(device-telemetry, WRITE)
+  -> denied: audit only; allowed: save telemetry and update last_seen_at
+```
+
+Mosquitto is bound to host loopback, rejects anonymous clients, and reads a password file generated from `.env`. The backend reconnects and resubscribes through Eclipse Paho. The demo uses one shared MQTT account, not per-device credentials or topic ACLs; the topic's device code is not cryptographically bound to a device.
 
 ## Persistence
 
-Flyway migrations `V1__create_users.sql`, `V2__create_devices.sql`, and `V3__create_policies.sql` define the schema. The V3 migration seeds three demonstration policies. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.
+Flyway migrations `V1__create_users.sql`, `V2__create_devices.sql`, `V3__create_policies.sql`, and `V4__add_access_audits_and_telemetry.sql` define the schema and demo rules. V4 adds access decision history, accepted telemetry, indexes, foreign keys, and sensor/camera telemetry-write ALLOW examples. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.

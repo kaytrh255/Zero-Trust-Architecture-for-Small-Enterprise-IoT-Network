@@ -41,13 +41,7 @@ Successful response: HTTP `200 OK` with `accessToken`, `tokenType` (`Bearer`), `
 
 ### `GET /api/auth/me` — authenticated
 
-Send the token from login in the `Authorization` header:
-
-```http
-Authorization: Bearer <accessToken>
-```
-
-Returns the current user's safe profile. Missing, malformed, invalid, or expired tokens return `401 Unauthorized`.
+Send the token from login in the `Authorization` header. Returns the current user's safe profile. Missing, malformed, invalid, or expired tokens return `401 Unauthorized`.
 
 ## Devices
 
@@ -135,9 +129,76 @@ Replaces the policy fields using the same request body as POST.
 
 Physically removes the policy and returns HTTP `204 No Content`.
 
-## Phase 4 policy evaluation boundary
+## Access decisions (Phase 5)
 
-`PolicyEvaluationService.findApplicablePolicy(subject, resource, action)` selects among enabled exact matches. A matching explicit `DENY` takes precedence over `ALLOW`; otherwise the first matching `ALLOW` is returned. No match returns an empty result. This service is not yet exposed as an access-check endpoint and does not produce an `AccessDecision`; Phase 5 will combine it with authentication, device status, and default DENY.
+### `POST /api/access/check` — authenticated
+
+This endpoint requires a valid JWT and records a decision for each valid request. The user identity and role are taken from the token. The caller cannot submit a requester ID, role, device type, or device status.
+
+Request:
+
+```json
+{
+  "deviceCode": "SENSOR-001",
+  "resource": "sensor-data",
+  "action": "READ"
+}
+```
+
+`deviceCode` must be 1–64 allowed characters; `resource` must be 1–100 allowed characters; `action` is `READ`, `WRITE`, or `EXECUTE`. Device code is normalized to uppercase and resource to lowercase. The device type/subject and status are looked up from PostgreSQL.
+
+Eligible API requester roles: `USER` and `DEVICE`. An authenticated `ADMIN` or `SECURITY_ANALYST` gets a business decision `DENY` with reason `REQUESTER_ROLE_NOT_ALLOWED`; this is not an HTTP `403` because the decision was evaluated and audited.
+
+Decision order:
+
+1. Require an eligible requester role.
+2. Require a registered device (`DEVICE_NOT_FOUND` otherwise).
+3. Require `ACTIVE` device status (`DEVICE_NOT_ACTIVE` otherwise).
+4. Evaluate enabled exact subject/resource/action policies; explicit matching `DENY` wins.
+5. If no rule matches, return default `DENY` (`NO_MATCHING_POLICY`).
+
+An evaluated `ALLOW` or `DENY` returns HTTP `200 OK`:
+
+```json
+{
+  "auditId": 17,
+  "decision": "ALLOW",
+  "reason": "POLICY_ALLOW",
+  "deviceCode": "SENSOR-001",
+  "resource": "sensor-data",
+  "action": "READ",
+  "matchedPolicyId": 1,
+  "matchedPolicyName": "Sensor Read Data",
+  "evaluatedAt": "2026-09-29T10:00:00Z"
+}
+```
+
+Other reasons: `EXPLICIT_DENY`, `NO_MATCHING_POLICY`, `DEVICE_NOT_FOUND`, `DEVICE_NOT_ACTIVE`, and `REQUESTER_ROLE_NOT_ALLOWED`. No matching policy defaults to DENY. Authentication failures still return `401`; invalid request fields return `400` before decision evaluation.
+
+### `GET /api/access/audits` — `ADMIN`, `SECURITY_ANALYST`
+
+Returns up to the most recent 100 evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, matching-policy snapshot, and time. Every valid API decision and evaluated MQTT telemetry attempt is stored in `access_audits`; malformed requests rejected before evaluation are not.
+
+## MQTT telemetry (Phase 5)
+
+The local Mosquitto broker requires the shared local MQTT username/password configured in `.env`. It listens on the host loopback interface. The backend subscribes to `iot/telemetry/+`; the topic suffix must be a registered device code.
+
+Message body:
+
+```json
+{
+  "metric": "temperature",
+  "value": 22.5,
+  "unit": "C",
+  "measuredAt": "2026-09-29T10:00:00Z"
+}
+```
+
+`measuredAt` is optional; when omitted, receive time is used. The payload is limited to 2048 bytes and validates metric, numeric precision, unit, and timestamp. Each valid message is checked as a `DEVICE`/`MQTT` request for `device-telemetry` / `WRITE`. Only an `ALLOW` for an `ACTIVE` registered sensor/camera is stored; DENY is audited and the telemetry row is not written. Accepted messages update `devices.last_seen_at`.
+
+### `GET /api/telemetry` — `ADMIN`, `SECURITY_ANALYST`
+
+Returns the most recent 100 accepted telemetry samples. MQTT uses a single shared local credential in this prototype; it is not a per-device identity or ACL system.
 
 ## Error responses
 
@@ -145,7 +206,7 @@ Validation, authentication, authorization, and application errors use a consiste
 
 ```json
 {
-  "timestamp": "2026-09-28T10:00:00Z",
+  "timestamp": "2026-09-29T10:00:00Z",
   "status": 403,
   "error": "ACCESS_DENIED",
   "message": "You do not have permission to perform this operation",
@@ -153,6 +214,6 @@ Validation, authentication, authorization, and application errors use a consiste
 }
 ```
 
-Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role, `404` missing resource, `409` duplicate identifier/name, and `500` unexpected server error.
+Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role for a management/read API, `404` missing resource, `409` duplicate identifier/name, and `500` unexpected server error. An evaluated access `DENY` is an HTTP `200` decision body, not an HTTP `403`.
 
-Access-check, audit, dashboard, and MQTT endpoints are planned but not implemented yet.
+Authentication-attempt and policy-change audits, dashboard endpoints, TLS, per-device MQTT credentials, and transparent enforcement on arbitrary IoT resources are not implemented yet.

@@ -36,3 +36,10 @@ management:
     health:
       show-components: always
       show-details: never
+
+mqtt:
+  broker-url: ${MQTT_BROKER_URL:tcp://localhost:1883}
+  username: ${MQTT_USERNAME:}
+  password: ${MQTT_PASSWORD:}
+  client-id: ${MQTT_CLIENT_ID:zero-trust-backend}
+  telemetry-topic: ${MQTT_TELEMETRY_TOPIC:iot/telemetry/+}

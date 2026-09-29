@@ -20,6 +20,47 @@ services:
       retries: 10
       start_period: 5s
 
+  mqtt-credentials:
+    image: eclipse-mosquitto:2
+    restart: "no"
+    user: "0:0"
+    environment:
+      MQTT_USERNAME: ${MQTT_USERNAME:?Set MQTT_USERNAME in .env}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?Set MQTT_PASSWORD in .env}
+    volumes:
+      - mosquitto_data:/mosquitto/data
+    entrypoint: ["/bin/sh", "-c"]
+    command: >-
+      set -eu;
+      mosquitto_passwd -b -c /mosquitto/data/password_file "$$MQTT_USERNAME" "$$MQTT_PASSWORD";
+      chown -R 1883:1883 /mosquitto/data
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    depends_on:
+      mqtt-credentials:
+        condition: service_completed_successfully
+    environment:
+      MQTT_USERNAME: ${MQTT_USERNAME:?Set MQTT_USERNAME in .env}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?Set MQTT_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${MQTT_PORT:-1883}:1883"
+    volumes:
+      - mosquitto_data:/mosquitto/data
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    command: ["mosquitto", "-c", "/mosquitto/config/mosquitto.conf"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mosquitto_pub -h 127.0.0.1 -p 1883 -u \"$$MQTT_USERNAME\" -P \"$$MQTT_PASSWORD\" -t zt/health -n"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
   backend:
     build:
       context: ./backend
@@ -27,6 +68,8 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      mosquitto:
         condition: service_healthy
     environment:
       SERVER_PORT: 8080
@@ -38,8 +81,14 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_FULL_NAME: ${ADMIN_FULL_NAME:-Zero Trust Administrator}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_USERNAME: ${MQTT_USERNAME:?Set MQTT_USERNAME in .env}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?Set MQTT_PASSWORD in .env}
+      MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-zero-trust-backend}
+      MQTT_TELEMETRY_TOPIC: ${MQTT_TELEMETRY_TOPIC:-iot/telemetry/+}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
 
 volumes:
   postgres_data:
+  mosquitto_data:
