@@ -38,7 +38,7 @@ No role, device status, or policy miss can be overridden by a matching ALLOW rul
 
 Mosquitto Dynamic Security is the broker authentication/authorization point. Each device has its own random 256-bit password, username equal to its normalized device code, and registered MQTT client ID. The create/rotate API returns the MQTT username and password once. The broker, not PostgreSQL, stores the MQTT credential verifier. Rotation replaces the broker password. Device accounts remain enabled across status changes: the per-device topic ACL still bounds publish scope, then the backend validates status and records `DEVICE_NOT_ACTIVE` for non-active devices before discarding their messages. The backend uses a different subscriber account and a separate role.
 
-- Device role: `publishClientSend iot/telemetry/%u allow`; username substitution binds the device to exactly `iot/telemetry/{username}`.
+- Each device gets a unique role `zt-device-{deviceCode}` with one literal `publishClientSend iot/telemetry/{deviceCode} allow` ACL. The broker therefore rejects cross-device topic publishes.
 - Backend role: subscribe/receive only on `iot/telemetry/+`.
 - Anonymous connection: disabled.
 - Unmatched publish/subscribe/receive/unsubscribe: denied by default (with explicit backend receive/subscription ACLs).

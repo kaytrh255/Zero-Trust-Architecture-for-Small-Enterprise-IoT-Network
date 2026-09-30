@@ -13,7 +13,7 @@ curl / Postman                         Simulated IoT publisher
       v                                           v
 Spring Boot application <====== verified TLS ======> Mosquitto :8883
   ├── AuthController / AuthService                 ├── Dynamic Security plugin
-  ├── JwtAuthenticationFilter                     ├── per-device publish ACL: iot/telemetry/%u
+  ├── JwtAuthenticationFilter                     ├── per-device literal publish ACL
   ├── DeviceController / DeviceService             └── backend-only subscribe role: iot/telemetry/+
   ├── MqttDynamicSecurityService
   ├── PolicyController / PolicyService
@@ -68,7 +68,7 @@ The API returns a policy decision for the demo request; it is not a reverse prox
 POST /api/devices or credential rotation
   -> generate a 256-bit random password
   -> MqttDynamicSecurityService provisions username=deviceCode,
-     fixed mqttClientId, and zt-device-publisher role over verified TLS
+     fixed mqttClientId, and a unique literal-topic role over verified TLS
   -> disclose mqttUsername/mqttPassword once
 
 publisher -> verified TLS + unique device credentials -> broker ACL
@@ -80,11 +80,11 @@ publisher -> verified TLS + unique device credentials -> broker ACL
   -> audit decision; store telemetry only after ALLOW
 ```
 
-Mosquitto Dynamic Security denies anonymous clients, keeps publishing/subscribing denied unless an ACL grants it, and restricts a device role to `publishClientSend iot/telemetry/%u`. The backend subscriber has a separate role for `iot/telemetry/+`; it does not use the administrative broker identity. The admin account is used only for provisioning and bootstrap. Broker accounts stay enabled across device-status changes so valid, topic-scoped publishes reach the backend and an inactive-device decision can be audited; non-active data is never persisted. Device code and MQTT client ID are immutable after provisioning so the broker identity/ACL binding cannot silently drift.
+Mosquitto Dynamic Security denies anonymous clients and keeps publishing/subscribing denied unless an ACL grants it. The backend creates a unique device role with one literal `publishClientSend iot/telemetry/{deviceCode}` ACL, so a device cannot publish to another device's topic. The backend subscriber has a separate role for `iot/telemetry/+`; it does not use the administrative broker identity. The admin account is used only for provisioning and bootstrap. Broker accounts stay enabled across device-status changes so valid, topic-scoped publishes reach the backend and an inactive-device decision can be audited; non-active data is never persisted. Device code and MQTT client ID are immutable after provisioning so the broker identity/ACL binding cannot silently drift.
 
 The telemetry body no longer contains an authentication secret. It contains a positive, monotonically increasing per-device `sequence`, metric, value, unit, and optional `measuredAt`. The row lock serializes concurrent checks, `last_mqtt_sequence` is advanced in the same transaction as the access audit and telemetry insert, and a unique `(device_id, device_sequence)` constraint is a second replay/duplicate guard. A repeated or lower sequence receives `DENY` / `REPLAYED_MESSAGE`; policy DENY and inactive-device checks remain in force.
 
-The MQTT broker username is authenticated by Mosquitto, and its `%u` ACL binds the permitted topic to that username. This prototype does not add device ownership enforcement to the protected HTTP resource path and does not verify application-level message signatures.
+Mosquitto authenticates the MQTT username and assigns that device a role with a literal ACL for its registered topic. This prototype does not add device ownership enforcement to the protected HTTP resource path and does not verify application-level message signatures.
 
 ## Persistence
 

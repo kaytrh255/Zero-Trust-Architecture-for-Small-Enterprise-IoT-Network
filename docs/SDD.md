@@ -22,7 +22,7 @@ The Spring Boot application owns REST APIs, JWT authentication, device and polic
 
 `AuthService` hashes account passwords with BCrypt and issues signed JWTs. Protected requests reload current account status and role. The bootstrap admin and all local service secrets are environment-configured. Public registration always assigns `USER`.
 
-Device creation issues a random 256-bit MQTT password. `MqttDynamicSecurityService` provisions/updates a Mosquitto client whose username is the normalized device code, client ID is fixed to the registered `mqttClientId`, and role is `zt-device-publisher`. Only the create/rotate response contains the plaintext MQTT password; PostgreSQL does not store it. Rotation changes the broker password. Broker accounts remain enabled across status changes so valid, topic-scoped telemetry reaches backend status validation and creates auditable `DEVICE_NOT_ACTIVE` decisions without persistence. Device code/client ID edits are rejected after provisioning so broker identity and ACLs cannot drift.
+Device creation issues a random 256-bit MQTT password. `MqttDynamicSecurityService` provisions/updates a Mosquitto client whose username is the normalized device code, client ID is fixed to the registered `mqttClientId`, and role is unique to that device with a literal publish ACL for `iot/telemetry/{deviceCode}`. Only the create/rotate response contains the plaintext MQTT password; PostgreSQL does not store it. Rotation changes the broker password. Broker accounts remain enabled across status changes so valid, topic-scoped telemetry reaches backend status validation and creates auditable `DEVICE_NOT_ACTIVE` decisions without persistence. Device code/client ID edits are rejected after provisioning so broker identity and ACLs cannot drift.
 
 ## 5. Zero Trust decision and protected-resource enforcement
 
@@ -36,14 +36,14 @@ The local Mosquitto broker exposes TLS listener `8883` only and is bound to host
 
 Mosquitto Dynamic Security denies anonymous clients and uses least-privilege roles:
 
-- `zt-device-publisher`: publish send ACL `iot/telemetry/%u allow`.
+- Per-device `zt-device-{deviceCode}` role: one literal publish send ACL `iot/telemetry/{deviceCode} allow`.
 - `zt-backend-subscriber`: subscribe and receive ACLs for `iot/telemetry/+` only.
 
 The backend provisioning/admin account is separate from the backend subscriber. The admin credential is used only for Dynamic Security control operations and local broker bootstrap. Device credential/TLS/ACL rejection occurs at the broker and is not written into application access audits. Broker acceptance is not a policy decision: the backend still validates device status, policy, and replay before persistence.
 
 ## 7. Telemetry and replay protection
 
-The telemetry JSON is limited to 2048 bytes and contains required positive `sequence`, metric, numeric value, unit, and optional `measuredAt`. It contains no application credential. The broker's username substitution binds a device to its own topic. The subscriber turns the authenticated topic suffix into a `DEVICE`/`MQTT` context and evaluates `device-telemetry` / `WRITE`.
+The telemetry JSON is limited to 2048 bytes and contains required positive `sequence`, metric, numeric value, unit, and optional `measuredAt`. It contains no application credential. The device's literal broker ACL binds its authenticated MQTT username to its own topic. The subscriber turns the authenticated topic suffix into a `DEVICE`/`MQTT` context and evaluates `device-telemetry` / `WRITE`.
 
 For an otherwise-allowed message, the device row lock compares the incoming sequence with `devices.last_mqtt_sequence`. A sequence less than or equal to the stored high-water mark is audited as `REPLAYED_MESSAGE`; no telemetry is written. For ALLOW, the high-water mark advances and the telemetry row is inserted in the same transaction. The database enforces unique `(device_id, device_sequence)` as defense in depth. Flyway V6 assigns sequence numbers to preexisting Phase 6 telemetry and initializes each device high-water mark to the corresponding maximum.
 

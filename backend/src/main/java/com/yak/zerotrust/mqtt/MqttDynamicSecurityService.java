@@ -29,7 +29,6 @@ public class MqttDynamicSecurityService {
 
     private static final String COMMAND_TOPIC = "$CONTROL/dynamic-security/v1";
     private static final String RESPONSE_TOPIC = "$CONTROL/dynamic-security/v1/response";
-    private static final String DEVICE_ROLE = "zt-device-publisher";
     private static final int COMMAND_TIMEOUT_SECONDS = 10;
 
     private final String brokerUrl;
@@ -100,6 +99,7 @@ public class MqttDynamicSecurityService {
 
     public void provisionDevice(String username, String mqttClientId, String password) {
         synchronized (commandLock) {
+            String deviceRole = ensureDeviceRole(username);
             JsonNode existingClient = findClient(username);
             ObjectNode command = objectMapper.createObjectNode()
                     .put("command", existingClient == null ? "createClient" : "modifyClient")
@@ -107,10 +107,67 @@ public class MqttDynamicSecurityService {
                     .put("password", password)
                     .put("clientid", mqttClientId);
             ArrayNode roles = command.putArray("roles");
-            roles.addObject().put("rolename", DEVICE_ROLE).put("priority", 10);
+            roles.addObject().put("rolename", deviceRole).put("priority", 10);
             sendCommand(command);
             enableClientIfNeeded(username);
         }
+    }
+
+    private String ensureDeviceRole(String deviceCode) {
+        String roleName = "zt-device-" + deviceCode.toLowerCase(Locale.ROOT);
+        String topic = "iot/telemetry/" + deviceCode;
+        JsonNode existingRole = findRole(roleName);
+        if (existingRole == null) {
+            ObjectNode command = objectMapper.createObjectNode()
+                    .put("command", "createRole")
+                    .put("rolename", roleName);
+            ArrayNode acls = command.putArray("acls");
+            acls.addObject()
+                    .put("acltype", "publishClientSend")
+                    .put("topic", topic)
+                    .put("priority", 10)
+                    .put("allow", true);
+            sendCommand(command);
+            JsonNode createdRole = findRole(roleName);
+            if (createdRole == null
+                    || !hasExpectedDeviceAcl(createdRole.path("data").path("role").path("acls"), topic)) {
+                throw new IllegalStateException("Mosquitto Dynamic Security device role was not created correctly: " + roleName);
+            }
+            return roleName;
+        }
+
+        JsonNode acls = existingRole.path("data").path("role").path("acls");
+        if (!hasExpectedDeviceAcl(acls, topic)) {
+            throw new IllegalStateException("Mosquitto Dynamic Security device role has unexpected ACLs: " + roleName);
+        }
+        return roleName;
+    }
+
+    private boolean hasExpectedDeviceAcl(JsonNode acls, String topic) {
+        if (!acls.isArray() || acls.size() != 1) {
+            return false;
+        }
+        JsonNode acl = acls.get(0);
+        return acl.path("acltype").asText().equals("publishClientSend")
+                && acl.path("topic").asText().equals(topic)
+                && acl.path("priority").asInt(-1) == 10
+                && acl.path("allow").asBoolean(false);
+    }
+
+    private JsonNode findRole(String roleName) {
+        ObjectNode command = objectMapper.createObjectNode()
+                .put("command", "getRole")
+                .put("rolename", roleName);
+        JsonNode result = sendCommand(command, true);
+        String error = result.path("error").asText("");
+        if (!error.isBlank()) {
+            String normalizedError = error.toLowerCase(Locale.ROOT);
+            if (normalizedError.contains("not found") || normalizedError.contains("does not exist")) {
+                return null;
+            }
+            throw new IllegalStateException("Mosquitto Dynamic Security getRole failed: " + error);
+        }
+        return result;
     }
 
     private void enableClientIfNeeded(String username) {

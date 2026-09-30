@@ -41,14 +41,7 @@ ensure_role() {
     fi
 }
 
-ensure_role zt-device-publisher
-ctrl removeRoleACL zt-device-publisher publishClientSend 'iot/telemetry/%u' >/dev/null 2>&1 || true
-ctrl addRoleACL zt-device-publisher publishClientSend 'iot/telemetry/%u' allow 10
-if ! ctrl getRole zt-device-publisher | grep -F 'publishClientSend' | grep -F 'iot/telemetry/%u' | grep -Fq 'allow'; then
-    echo "Device publisher role ACL was not applied" >&2
-    exit 1
-fi
-
+# Device publisher roles are created per device with a literal topic ACL by the backend.
 ensure_role zt-backend-subscriber
 ctrl removeRoleACL zt-backend-subscriber subscribePattern 'iot/telemetry/+' >/dev/null 2>&1 || true
 ctrl addRoleACL zt-backend-subscriber subscribePattern 'iot/telemetry/+' allow 10
