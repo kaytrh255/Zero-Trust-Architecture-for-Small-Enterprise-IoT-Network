@@ -12,6 +12,7 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 5:** authenticated access decisions, device-status validation, explicit DENY precedence, default DENY, access-audit records, and policy-gated MQTT telemetry ingestion.
 - **Phase 6:** a real policy-gated protected telemetry read route. The JWT supplies requester identity; the path names the target device. No device-ownership check is implemented.
 - **Phase 7:** per-device Mosquitto Dynamic Security usernames/passwords and topic ACLs, TLS with a locally generated trusted CA and hostname verification, and monotonic sequence replay protection with audit/database persistence. Device status is evaluated by the backend so status denials remain auditable.
+- **Phase 8:** an opt-in Java integration test exercises the running Compose stack end-to-end: TLS trust, credential rotation/client-ID/topic ACLs, status and policy denials, default DENY, replay, audit persistence, and the protected-resource route.
 
 The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
 
@@ -221,6 +222,29 @@ docker compose exec postgres psql -U postgres -d zerotrust -c \
 ```
 
 Every DENY case must leave telemetry unchanged. Broker authentication/topic-ACL failures are distinct from backend policy/status/replay denials: only the latter are database-audited. Existing telemetry was assigned a starting sequence during V6; query `last_mqtt_sequence` before choosing a first message after upgrading.
+
+## Phase 8: run the Compose integration test
+
+The integration test targets an already running local Compose stack. It is skipped by ordinary `mvn test`; opt in by setting `PHASE8_INTEGRATION=true`. It creates uniquely named test users/devices and a temporary DENY policy (the policy is removed at the end, while test users/devices and their audit/telemetry rows remain). Run it only against a disposable/local demo database, not production data.
+
+Start the stack using the earlier Compose instructions, then from the repository root export the local environment and run the test:
+
+```bash
+set -a
+. ./.env
+set +a
+export PHASE8_INTEGRATION=true
+export PHASE8_ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+export PHASE8_ADMIN_PASSWORD="$ADMIN_PASSWORD"
+export PHASE8_BASE_URL="http://localhost:${BACKEND_PORT:-8080}"
+export PHASE8_MQTT_BROKER_URI="ssl://localhost:${MQTT_PORT:-8883}"
+export PHASE8_MQTT_CA_FILE="$PWD/mosquitto/tls/ca.crt"
+(cd backend && mvn -Dtest=Phase8ComposeIntegrationTest test)
+```
+
+The test checks: (1) admin and USER JWT flows plus health, (2) one-time per-device credentials and rotation invalidating the old password, (3) trusted TLS succeeds while the system-default untrusted CA, wrong client ID, and a cross-device topic fail, (4) ALLOW, replay, blocked-device, explicit policy DENY, and ACTUATOR no-match/default-DENY MQTT outcomes and audit rows, (5) denied messages do not change `last_seen_at` or persist telemetry, and (6) a non-owner USER can read the target's telemetry when policy allows, while blocked and no-matching-policy reads return HTTP 403, an audit ID, and an empty list. Test-created users/devices are identifiable by the `phase8-` / `PHASE8-` prefixes.
+
+Use Java 21 and Maven 3.9+ on the host. To run unit tests without Compose, use `cd backend && mvn test`; the end-to-end test remains disabled unless `PHASE8_INTEGRATION=true`. The integration test was added as an executable verification path, but it has not been run in this environment because Java/Maven and Docker Compose are unavailable.
 
 ## Security locations and limitations
 

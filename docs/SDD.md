@@ -53,7 +53,7 @@ Flyway V1–V6 create/update users, devices, policies, audits, and telemetry. V6
 
 ## 9. Testing and demo
 
-Unit tests cover the policy/status order, explicit DENY/default DENY, replay high-water behavior, telemetry persistence only after ALLOW, device provisioning/rotation delegation, and protected-resource query gating. Manual Compose checks should verify: TLS and hostname trust; a device can publish to its own topic; another topic, password, or client ID fails at Mosquitto; first/newer sequences are stored; repeated/lower sequences are audited and not stored; blocked/revoked devices reach backend status evaluation and are audited but not stored; explicit policy DENY/default DENY store nothing; and protected-resource ALLOW/DENY still behave as before. Runtime verification requires Java/Maven and Docker Compose.
+Unit tests cover the policy/status order, explicit DENY/default DENY, replay high-water behavior, telemetry persistence only after ALLOW, device provisioning/rotation delegation, and protected-resource query gating. `Phase8ComposeIntegrationTest` is an opt-in JUnit end-to-end test (`PHASE8_INTEGRATION=true`) against an already running Compose stack. It checks trusted/untrusted TLS, rotated and invalid MQTT credentials/client IDs, per-device topic ACLs, ALLOW/replay/status/explicit DENY/default DENY ingestion outcomes and audit persistence, and the protected resource. It creates unique users/devices and removes its temporary policy, but intentionally leaves test records in the local database. Run it only against a disposable local stack. Manual expected outcomes are documented in README. Runtime verification was not possible here because Java/Maven and Docker Compose are unavailable.
 
 ## 10. Limitations
 
