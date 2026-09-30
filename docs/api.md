@@ -83,7 +83,7 @@ The backend provisions a Mosquitto Dynamic Security client and assigns the least
 
 ### `POST /api/devices/{id}/credentials/rotate` — `ADMIN`
 
-Returns HTTP `200 OK`, replaces the broker password, and returns the username/password once. The previous password becomes invalid. Use this route to provision the bootstrapped demo devices or recover a lost credential. The new password is provisioned with the device's fixed client ID and current status.
+Returns HTTP `200 OK`, replaces the broker password, and returns the username/password once. The previous password becomes invalid. Use this route to provision the bootstrapped demo devices or recover a lost credential. The broker account remains enabled regardless of device status so a topic-scoped MQTT publish can reach backend status validation and be audited; a non-`ACTIVE` device's message is denied and not stored.
 
 ### `PUT /api/devices/{id}` — `ADMIN`
 
@@ -99,11 +99,11 @@ Request:
 }
 ```
 
-Allowed statuses: `ACTIVE`, `INACTIVE`, `BLOCKED`, `REVOKED`. A non-`ACTIVE` status disables the matching broker account (if provisioned); `ACTIVE` re-enables it. The backend still checks status on every delivered telemetry message.
+Allowed statuses: `ACTIVE`, `INACTIVE`, `BLOCKED`, `REVOKED`. Status is enforced in the backend on every delivered telemetry message. Broker accounts remain enabled so status failures create `DEVICE_NOT_ACTIVE` audit rows; those messages are not persisted and do not advance the replay high-water mark.
 
 ### `DELETE /api/devices/{id}` — `ADMIN`
 
-Returns HTTP `204 No Content`, sets the device to `REVOKED`, and disables its broker account; the row is retained rather than physically removed.
+Returns HTTP `204 No Content` and sets the device to `REVOKED`; the row and broker credential remain, but backend status validation denies and audits any valid scoped telemetry without storing it. The device is retained rather than physically removed.
 
 ## Policies
 

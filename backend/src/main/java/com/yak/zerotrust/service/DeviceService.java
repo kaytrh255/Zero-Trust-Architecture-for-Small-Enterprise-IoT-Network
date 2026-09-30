@@ -70,8 +70,7 @@ public class DeviceService {
         mqttDynamicSecurityService.provisionDevice(
                 savedDevice.getDeviceCode(),
                 savedDevice.getMqttClientId(),
-                mqttPassword,
-                savedDevice.getStatus() == DeviceStatus.ACTIVE
+                mqttPassword
         );
         return provisioningResponse(savedDevice, mqttPassword);
     }
@@ -83,8 +82,7 @@ public class DeviceService {
         mqttDynamicSecurityService.provisionDevice(
                 device.getDeviceCode(),
                 device.getMqttClientId(),
-                mqttPassword,
-                device.getStatus() == DeviceStatus.ACTIVE
+                mqttPassword
         );
         return provisioningResponse(device, mqttPassword);
     }
@@ -112,7 +110,6 @@ public class DeviceService {
     public DeviceResponse updateStatus(Long id, DeviceStatus status) {
         Device device = findDevice(id);
         device.changeStatus(status);
-        mqttDynamicSecurityService.setDeviceEnabled(device.getDeviceCode(), status == DeviceStatus.ACTIVE);
         return toResponse(device);
     }
 
@@ -120,7 +117,6 @@ public class DeviceService {
     public void revoke(Long id) {
         Device device = findDevice(id);
         device.changeStatus(DeviceStatus.REVOKED);
-        mqttDynamicSecurityService.setDeviceEnabled(device.getDeviceCode(), false);
     }
 
     private Device findDevice(Long id) {

@@ -156,6 +156,7 @@ class ZeroTrustDecisionServiceTest {
         assertThat(decision.decision()).isEqualTo(AccessDecisionOutcome.DENY);
         assertThat(decision.reason()).isEqualTo(AccessDecisionReason.DEVICE_NOT_ACTIVE);
         verify(policyEvaluationService, never()).findApplicablePolicy(any(), any(), any());
+        verify(accessAuditService).record(any(AccessContext.class), any(AccessDecision.class));
     }
 
     @Test

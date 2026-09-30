@@ -11,7 +11,7 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phases 1–4:** Java 21 / Spring Boot, PostgreSQL / Flyway, Docker Compose, user registration/JWT, device management, and exact-match policy CRUD.
 - **Phase 5:** authenticated access decisions, device-status validation, explicit DENY precedence, default DENY, access-audit records, and policy-gated MQTT telemetry ingestion.
 - **Phase 6:** a real policy-gated protected telemetry read route. The JWT supplies requester identity; the path names the target device. No device-ownership check is implemented.
-- **Phase 7:** per-device Mosquitto Dynamic Security usernames/passwords and topic ACLs, TLS with a locally generated trusted CA and hostname verification, broker account enable/disable with device status, and monotonic sequence replay protection with audit/database persistence.
+- **Phase 7:** per-device Mosquitto Dynamic Security usernames/passwords and topic ACLs, TLS with a locally generated trusted CA and hostname verification, and monotonic sequence replay protection with audit/database persistence. Device status is evaluated by the backend so status denials remain auditable.
 
 The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
 
@@ -119,7 +119,7 @@ curl -i -X POST http://localhost:8080/api/devices/1/credentials/rotate \
   -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
 ```
 
-The response includes `mqttUsername` (the uppercase device code) and a random `mqttPassword`, both returned only on create/rotation. Save the password directly in the device's local secret store; do not commit or log it. Mosquitto Dynamic Security authenticates the username/password and fixed `mqttClientId`; PostgreSQL does not store the password. Rotation invalidates the previous broker password. Phase 6's `deviceToken` field in the telemetry body is retired; after upgrading, rotate each existing device credential to provision its broker account. A device code and MQTT client ID cannot be changed after provisioning; create a new device identity instead. Non-`ACTIVE`/revoked device status disables the corresponding broker client; setting the status back to `ACTIVE` re-enables it.
+The response includes `mqttUsername` (the uppercase device code) and a random `mqttPassword`, both returned only on create/rotation. Save the password directly in the device's local secret store; do not commit or log it. Mosquitto Dynamic Security authenticates the username/password and fixed `mqttClientId`; PostgreSQL does not store the password. Rotation invalidates the previous broker password. Phase 6's `deviceToken` field in the telemetry body is retired; after upgrading, rotate each existing device credential to provision its broker account. A device code and MQTT client ID cannot be changed after provisioning; create a new device identity instead. Broker accounts stay enabled when a device is `INACTIVE`, `BLOCKED`, or `REVOKED` so authorized-topic messages can reach the backend status check and be audited; they are never stored while status is non-`ACTIVE`.
 
 For a device created with `POST /api/devices`, the broker account is provisioned immediately and the HTTP response has the same credential fields.
 
@@ -204,7 +204,7 @@ Use an `ADMIN` token for device credential provisioning, status/policy changes, 
 | Use `SENSOR-001` credentials to publish to `iot/telemetry/CAMERA-001`. | Mosquitto ACL denies the publish before ingestion; no telemetry row and no database audit are added. Broker log records the denial. |
 | Use a wrong MQTT password or wrong client ID. | Broker rejects the connection; no telemetry or access-audit row. Mosquitto logs the authentication failure. |
 | Omit `--cafile` or supply an untrusted CA. | TLS verification fails before MQTT authentication; no telemetry or access-audit row. |
-| Provision `SENSOR-002` while it is `BLOCKED`, or set a provisioned device to `BLOCKED`/`REVOKED`. | Broker client is disabled; new MQTT connections are denied. A direct protected-resource request for `SENSOR-002` remains HTTP `403` / `DEVICE_NOT_ACTIVE` with an audit ID. |
+| Rotate/provision `SENSOR-002` credentials while it is `BLOCKED`, or mark an already provisioned device `BLOCKED`/`REVOKED`; publish to its own topic with valid credentials. | Broker accepts the scoped publish; the backend records `DENY` / `DEVICE_NOT_ACTIVE`, adds no telemetry, and does not advance the sequence high-water mark. A protected-resource request is also HTTP `403` with an audit ID. |
 | Keep the device active but add an enabled `DENY` policy for its `device-telemetry` / `WRITE` action, then publish a new sequence. | Broker ACL allows the device's own topic, but the backend stores no sample and adds `DENY` / `EXPLICIT_DENY`. The sequence high-water mark does not advance. |
 | Disable/remove all matching telemetry policies and publish a new sequence. | Broker ACL allows the publish, but backend returns `DENY` / `NO_MATCHING_POLICY`; no telemetry row is written (default DENY). |
 | `USER` reads `/api/resources/devices/SENSOR-001/telemetry`. | HTTP `200` only when status and policy allow; data is for the requested target device. |
@@ -227,7 +227,7 @@ Every DENY case must leave telemetry unchanged. Broker authentication/topic-ACL 
 - `JwtAuthenticationFilter` authenticates API callers and reloads current account status/role.
 - `AccessController` derives the requester from that principal; `ZeroTrustDecisionService` loads registered device state under a database row lock and combines it with `PolicyEvaluationService` results.
 - `ProtectedResourceService` evaluates the fixed telemetry read context before querying PostgreSQL; a DENY response contains no resource data.
-- `MqttDynamicSecurityService` uses verified TLS and the dedicated Dynamic Security administrator to provision/rotate device credentials and enable/disable broker clients.
+- `MqttDynamicSecurityService` uses verified TLS and the dedicated Dynamic Security administrator to provision/rotate device credentials. Broker accounts stay enabled across device-status changes so the backend can audit `DEVICE_NOT_ACTIVE` denials.
 - Mosquitto Dynamic Security binds each per-device username to the `iot/telemetry/%u` publish ACL; the backend subscriber uses a distinct least-privilege account.
 - `TelemetryIngestionService` validates payload shape and sequence, then applies the same active-status/policy decision. Accepted sequence advancement and telemetry persistence are atomic; repeated/lower sequences are audited and not stored.
 - `AccessAuditService` persists decisions; audit/telemetry read endpoints are restricted to `ADMIN` and `SECURITY_ANALYST`.

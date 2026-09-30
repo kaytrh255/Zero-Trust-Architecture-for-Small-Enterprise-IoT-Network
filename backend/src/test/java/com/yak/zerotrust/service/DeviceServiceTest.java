@@ -3,6 +3,7 @@ package com.yak.zerotrust.service;
 import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.entity.Device;
+import com.yak.zerotrust.entity.DeviceStatus;
 import com.yak.zerotrust.exception.DeviceConflictException;
 import com.yak.zerotrust.entity.DeviceType;
 import com.yak.zerotrust.entity.UserAccount;
@@ -21,7 +22,6 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -57,7 +57,7 @@ class DeviceServiceTest {
         assertThat(response.mqttUsername()).isEqualTo("SENSOR-003");
         assertThat(response.mqttPassword()).isEqualTo(mqttPassword);
         assertThat(response.device().deviceCode()).isEqualTo("SENSOR-003");
-        verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", mqttPassword, true);
+        verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", mqttPassword);
         ArgumentCaptor<Device> deviceCaptor = ArgumentCaptor.forClass(Device.class);
         verify(deviceRepository).save(deviceCaptor.capture());
         assertThat(deviceCaptor.getValue().getLastMqttSequence()).isZero();
@@ -80,7 +80,7 @@ class DeviceServiceTest {
 
         assertThat(response.mqttUsername()).isEqualTo("SENSOR-003");
         assertThat(response.mqttPassword()).isEqualTo("B".repeat(43));
-        verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", "B".repeat(43), true);
+        verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", "B".repeat(43));
     }
 
     @Test
@@ -105,7 +105,23 @@ class DeviceServiceTest {
         assertThatThrownBy(() -> service().update(3L, changedIdentity))
                 .isInstanceOf(DeviceConflictException.class)
                 .hasMessageContaining("cannot change");
-        verify(mqttDynamicSecurityService, never()).provisionDevice(anyString(), anyString(), anyString(), anyBoolean());
+        verify(mqttDynamicSecurityService, never()).provisionDevice(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void keepsBrokerIdentityAvailableForBackendStatusAuditing() {
+        Device device = new Device(
+                "SENSOR-003",
+                "Temperature Sensor 3",
+                DeviceType.SENSOR,
+                "192.168.10.24",
+                "SENSOR-003",
+                new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true)
+        );
+        when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
+
+        assertThat(service().updateStatus(3L, DeviceStatus.BLOCKED).status()).isEqualTo(DeviceStatus.BLOCKED);
+        verify(mqttDynamicSecurityService, never()).provisionDevice(anyString(), anyString(), anyString());
     }
 
     private DeviceService service() {

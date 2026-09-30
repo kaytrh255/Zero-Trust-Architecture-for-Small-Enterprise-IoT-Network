@@ -98,7 +98,7 @@ public class MqttDynamicSecurityService {
         }
     }
 
-    public void provisionDevice(String username, String mqttClientId, String password, boolean enabled) {
+    public void provisionDevice(String username, String mqttClientId, String password) {
         synchronized (commandLock) {
             JsonNode existingClient = findClient(username);
             ObjectNode command = objectMapper.createObjectNode()
@@ -109,27 +109,16 @@ public class MqttDynamicSecurityService {
             ArrayNode roles = command.putArray("roles");
             roles.addObject().put("rolename", DEVICE_ROLE).put("priority", 10);
             sendCommand(command);
-            ensureEnabledState(username, enabled);
+            enableClientIfNeeded(username);
         }
     }
 
-    public void setDeviceEnabled(String username, boolean enabled) {
-        synchronized (commandLock) {
-            ensureEnabledState(username, enabled);
-        }
-    }
-
-    private void ensureEnabledState(String username, boolean enabled) {
+    private void enableClientIfNeeded(String username) {
         JsonNode existingClient = findClient(username);
-        if (existingClient == null) {
-            // A legacy device has no broker credential yet; it cannot connect until provisioned.
-            return;
-        }
-
-        boolean currentlyDisabled = existingClient.path("data").path("client").path("disabled").asBoolean(false);
-        if (currentlyDisabled == enabled) {
+        if (existingClient != null
+                && existingClient.path("data").path("client").path("disabled").asBoolean(false)) {
             ObjectNode command = objectMapper.createObjectNode()
-                    .put("command", enabled ? "enableClient" : "disableClient")
+                    .put("command", "enableClient")
                     .put("username", username);
             sendCommand(command);
         }

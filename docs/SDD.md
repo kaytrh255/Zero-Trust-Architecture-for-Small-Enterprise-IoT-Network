@@ -11,7 +11,7 @@ This modular-monolith prototype demonstrates Zero Trust for a small-enterprise I
 - Device and policy management with role-protected APIs.
 - Zero Trust access decisions: registered device state, enabled exact-match policies, explicit DENY precedence, default DENY, and persistent audit records.
 - A protected telemetry read route that fetches data only after ALLOW.
-- Per-device MQTT credentials and topic ACLs through Mosquitto Dynamic Security, TLS with CA and hostname verification, device status enable/disable, and monotonic sequence replay protection.
+- Per-device MQTT credentials and topic ACLs through Mosquitto Dynamic Security, TLS with CA and hostname verification, backend device-status enforcement with auditable denials, and monotonic sequence replay protection.
 - No dashboard, physical-device deployment, transparent packet gateway, or per-user device-ownership enforcement.
 
 ## 3. Architecture
@@ -22,7 +22,7 @@ The Spring Boot application owns REST APIs, JWT authentication, device and polic
 
 `AuthService` hashes account passwords with BCrypt and issues signed JWTs. Protected requests reload current account status and role. The bootstrap admin and all local service secrets are environment-configured. Public registration always assigns `USER`.
 
-Device creation issues a random 256-bit MQTT password. `MqttDynamicSecurityService` provisions/updates a Mosquitto client whose username is the normalized device code, client ID is fixed to the registered `mqttClientId`, and role is `zt-device-publisher`. Only the create/rotate response contains the plaintext MQTT password; PostgreSQL does not store it. Rotation changes the broker password. Non-ACTIVE status and revoke disable the broker client. Device code/client ID edits are rejected after provisioning so broker identity and ACLs cannot drift.
+Device creation issues a random 256-bit MQTT password. `MqttDynamicSecurityService` provisions/updates a Mosquitto client whose username is the normalized device code, client ID is fixed to the registered `mqttClientId`, and role is `zt-device-publisher`. Only the create/rotate response contains the plaintext MQTT password; PostgreSQL does not store it. Rotation changes the broker password. Broker accounts remain enabled across status changes so valid, topic-scoped telemetry reaches backend status validation and creates auditable `DEVICE_NOT_ACTIVE` decisions without persistence. Device code/client ID edits are rejected after provisioning so broker identity and ACLs cannot drift.
 
 ## 5. Zero Trust decision and protected-resource enforcement
 
@@ -53,7 +53,7 @@ Flyway V1–V6 create/update users, devices, policies, audits, and telemetry. V6
 
 ## 9. Testing and demo
 
-Unit tests cover the policy/status order, explicit DENY/default DENY, replay high-water behavior, telemetry persistence only after ALLOW, device provisioning/rotation delegation, and protected-resource query gating. Manual Compose checks should verify: TLS and hostname trust; a device can publish to its own topic; another topic, password, or client ID fails at Mosquitto; first/newer sequences are stored; repeated/lower sequences are audited and not stored; blocked/revoked devices are disabled; explicit policy DENY/default DENY store nothing; and protected-resource ALLOW/DENY still behave as before. Runtime verification requires Java/Maven and Docker Compose.
+Unit tests cover the policy/status order, explicit DENY/default DENY, replay high-water behavior, telemetry persistence only after ALLOW, device provisioning/rotation delegation, and protected-resource query gating. Manual Compose checks should verify: TLS and hostname trust; a device can publish to its own topic; another topic, password, or client ID fails at Mosquitto; first/newer sequences are stored; repeated/lower sequences are audited and not stored; blocked/revoked devices reach backend status evaluation and are audited but not stored; explicit policy DENY/default DENY store nothing; and protected-resource ALLOW/DENY still behave as before. Runtime verification requires Java/Maven and Docker Compose.
 
 ## 10. Limitations
 
