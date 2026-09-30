@@ -21,10 +21,10 @@ jobs:
     timeout-minutes: 35
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Java 21 and Maven cache
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '21'
@@ -74,6 +74,22 @@ jobs:
           PHASE8_MQTT_BROKER_URI: ssl://127.0.0.1:8883
           PHASE8_MQTT_CA_FILE: ${{ github.workspace }}/mosquitto/tls/ca.crt
         run: mvn --batch-mode -Dtest=Phase8ComposeIntegrationTest test
+
+      - name: Add Maven test reports to the job summary
+        if: always()
+        shell: bash
+        run: |
+          for report in backend/target/surefire-reports/*.txt; do
+            [ -f "$report" ] || continue
+            {
+              echo
+              echo "### $(basename "$report")"
+              echo
+              echo '```text'
+              cat "$report"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Dump Compose logs on failure
         if: failure()
