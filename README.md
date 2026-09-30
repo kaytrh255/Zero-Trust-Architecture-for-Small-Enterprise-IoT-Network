@@ -236,8 +236,8 @@ set +a
 export PHASE8_INTEGRATION=true
 export PHASE8_ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 export PHASE8_ADMIN_PASSWORD="$ADMIN_PASSWORD"
-export PHASE8_BASE_URL="http://localhost:${BACKEND_PORT:-8080}"
-export PHASE8_MQTT_BROKER_URI="ssl://localhost:${MQTT_PORT:-8883}"
+export PHASE8_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
+export PHASE8_MQTT_BROKER_URI="ssl://127.0.0.1:${MQTT_PORT:-8883}"
 export PHASE8_MQTT_CA_FILE="$PWD/mosquitto/tls/ca.crt"
 (cd backend && mvn -Dtest=Phase8ComposeIntegrationTest test)
 ```

@@ -38,10 +38,10 @@ class Phase8ComposeIntegrationTest {
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
-    private final String baseUrl = environment("PHASE8_BASE_URL", "http://localhost:8080");
+    private final String baseUrl = environment("PHASE8_BASE_URL", "http://127.0.0.1:8080");
     private final String brokerUri = environment(
             "PHASE8_MQTT_BROKER_URI",
-            "ssl://localhost:" + environment("MQTT_PORT", "8883")
+            "ssl://127.0.0.1:" + environment("MQTT_PORT", "8883")
     );
     private final Path caFile = Path.of(environment("PHASE8_MQTT_CA_FILE", "../mosquitto/tls/ca.crt"))
             .toAbsolutePath();
