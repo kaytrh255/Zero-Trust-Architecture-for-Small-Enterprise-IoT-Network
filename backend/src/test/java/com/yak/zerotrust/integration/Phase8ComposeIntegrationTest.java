@@ -313,13 +313,20 @@ class Phase8ComposeIntegrationTest {
     }
 
     private void awaitAudit(String adminToken, String deviceCode, String reason, Long sequence) throws Exception {
-        await(() -> {
-            try {
-                return audits(adminToken).stream().anyMatch(matchesAudit(deviceCode, reason, sequence));
-            } catch (Exception exception) {
-                throw new IllegalStateException(exception);
+        Predicate<JsonNode> expectedAudit = matchesAudit(deviceCode, reason, sequence);
+        long deadline = System.nanoTime() + ASYNC_WAIT.toNanos();
+        List<JsonNode> observedForDevice = List.of();
+        do {
+            observedForDevice = audits(adminToken).stream()
+                    .filter(row -> row.path("deviceCode").asText().equals(deviceCode))
+                    .toList();
+            if (observedForDevice.stream().anyMatch(expectedAudit)) {
+                return;
             }
-        }, "audit " + reason + " for " + deviceCode + " sequence " + sequence);
+            Thread.sleep(200);
+        } while (System.nanoTime() < deadline);
+        throw new AssertionError("Timed out waiting for audit " + reason + " for " + deviceCode
+                + " sequence " + sequence + "; observed audit rows: " + observedForDevice);
     }
 
     private void awaitTelemetry(String adminToken, String deviceCode, Long sequence, boolean expected) throws Exception {

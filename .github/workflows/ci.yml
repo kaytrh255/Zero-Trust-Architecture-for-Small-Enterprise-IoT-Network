@@ -48,6 +48,8 @@ jobs:
           done
           jwt_secret="$(openssl rand -base64 32 | tr -d '\n')"
           sed -i "s|^JWT_SECRET=.*|JWT_SECRET=${jwt_secret}|" .env
+          # Enable packet-header tracing only in this disposable CI checkout.
+          sed -i '/^log_type information$/a log_type debug' mosquitto/config/mosquitto.conf
 
       - name: Start PostgreSQL, Mosquitto, and backend
         run: docker compose up --build --detach
@@ -62,7 +64,9 @@ jobs:
             sleep 2
           done
           docker compose ps --all
-          docker compose logs --no-color --timestamps
+          docker compose logs --no-color --timestamps postgres mqtt-init mqtt-bootstrap backend || true
+          docker compose logs --no-color --timestamps mosquitto \
+            | grep -Ei 'not author|denied|error|iot/telemetry|dynsec' || true
           exit 1
 
       - name: Run Phase 8 Compose integration test
@@ -132,7 +136,11 @@ jobs:
 
       - name: Dump Compose logs on failure
         if: failure()
-        run: docker compose logs --no-color --timestamps || true
+        shell: bash
+        run: |
+          docker compose logs --no-color --timestamps postgres mqtt-init mqtt-bootstrap backend || true
+          docker compose logs --no-color --timestamps mosquitto \
+            | grep -Ei 'PUBLISH.*iot/telemetry|not author|denied|PHASE8-|iot/telemetry|dynsec:.*(createClient|modifyClient)' || true
 
       - name: Stop stack and remove ephemeral volumes
         if: always()
