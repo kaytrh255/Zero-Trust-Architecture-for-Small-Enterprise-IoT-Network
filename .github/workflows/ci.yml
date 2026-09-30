@@ -109,12 +109,25 @@ jobs:
         shell: bash
         run: |
           backend_errors="$(docker compose logs --no-color --since 5m backend 2>&1 \
-            | grep -E 'ERROR|Exception|Caused by:' \
+            | grep -E 'WARN|ERROR|Exception|Caused by:' \
             | tail -n 20 | awk '{printf "%s ", $0}' | tr -s ' ' || true)"
           if [ -n "$backend_errors" ]; then
             backend_errors="${backend_errors:0:6000}"
             backend_errors="${backend_errors//'%'/'%25'}"
             echo "::error title=Backend error log details::${backend_errors}"
+          fi
+
+      - name: Annotate broker logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          broker_log="$(docker compose logs --no-color --since 5m mosquitto 2>&1 \
+            | grep -Ei 'WARN|ERROR|denied|not authorized|ACL|connect|disconnect|subscribe|publish|dynsec|PHASE8-' \
+            | tail -n 60 | awk '{printf "%s ", $0}' | tr -s ' ' || true)"
+          if [ -n "$broker_log" ]; then
+            broker_log="${broker_log:0:6000}"
+            broker_log="${broker_log//'%'/'%25'}"
+            echo "::error title=Mosquitto broker log details::${broker_log}"
           fi
 
       - name: Dump Compose logs on failure
