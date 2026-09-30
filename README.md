@@ -244,7 +244,7 @@ export PHASE8_MQTT_CA_FILE="$PWD/mosquitto/tls/ca.crt"
 
 The test checks: (1) admin and USER JWT flows plus health, (2) one-time per-device credentials and rotation invalidating the old password, (3) trusted TLS succeeds while the system-default untrusted CA, wrong client ID, and a cross-device topic fail, (4) ALLOW, replay, blocked-device, explicit policy DENY, and ACTUATOR no-match/default-DENY MQTT outcomes and audit rows, (5) denied messages do not change `last_seen_at` or persist telemetry, and (6) a non-owner USER can read the target's telemetry when policy allows, while blocked and no-matching-policy reads return HTTP 403, an audit ID, and an empty list. Test-created users/devices are identifiable by the `phase8-` / `PHASE8-` prefixes.
 
-Use Java 21 and Maven 3.9+ on the host. To run unit tests without Compose, use `cd backend && mvn test`; the end-to-end test remains disabled unless `PHASE8_INTEGRATION=true`. The integration test was added as an executable verification path, but it has not been run in this environment because Java/Maven and Docker Compose are unavailable.
+Use Java 21 and Maven 3.9+ on the host. To run unit tests without Compose, use `cd backend && mvn test`; the end-to-end test remains disabled unless `PHASE8_INTEGRATION=true`. `.github/workflows/ci.yml` runs the unit suite, starts Compose with per-job local credentials, waits for backend health, runs this integration test, collects container logs on failure, and removes the ephemeral Compose volumes. The workflow uses no GitHub secrets. Its results are reported on pull requests and pushes to `main` or this development branch.
 
 ## Security locations and limitations
 
