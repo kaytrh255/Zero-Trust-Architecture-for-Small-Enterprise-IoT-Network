@@ -78,6 +78,40 @@ class ZeroTrustDecisionServiceTest {
     }
 
     @Test
+    void acceptsOnlyNewerMqttSequencesAndRecordsTheHighWaterMark() {
+        Device device = device(DeviceStatus.ACTIVE);
+        when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
+        when(policyEvaluationService.findApplicablePolicy("SENSOR", "device-telemetry", PolicyAction.WRITE))
+                .thenReturn(Optional.of(policy("Sensor Publish Telemetry", "device-telemetry", PolicyAction.WRITE, PolicyEffect.ALLOW)));
+
+        AccessEvaluation first = zeroTrustDecisionService.evaluate(mqttContext("SENSOR-001", 4L));
+
+        assertThat(first.decision().decision()).isEqualTo(AccessDecisionOutcome.ALLOW);
+        assertThat(device.getLastMqttSequence()).isEqualTo(4L);
+        verify(accessAuditService).record(any(AccessContext.class), any(AccessDecision.class));
+    }
+
+    @Test
+    void deniesAndAuditsAReplayedMqttSequenceAfterExplicitPolicyEvaluation() {
+        Device device = device(DeviceStatus.ACTIVE);
+        device.recordMqttSequence(8L);
+        when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
+        when(policyEvaluationService.findApplicablePolicy("SENSOR", "device-telemetry", PolicyAction.WRITE))
+                .thenReturn(Optional.of(policy("Sensor Publish Telemetry", "device-telemetry", PolicyAction.WRITE, PolicyEffect.ALLOW)));
+
+        AccessEvaluation replay = zeroTrustDecisionService.evaluate(mqttContext("SENSOR-001", 8L));
+
+        assertThat(replay.decision().decision()).isEqualTo(AccessDecisionOutcome.DENY);
+        assertThat(replay.decision().reason()).isEqualTo(AccessDecisionReason.REPLAYED_MESSAGE);
+        assertThat(device.getLastMqttSequence()).isEqualTo(8L);
+        ArgumentCaptor<AccessContext> contextCaptor = ArgumentCaptor.forClass(AccessContext.class);
+        ArgumentCaptor<AccessDecision> decisionCaptor = ArgumentCaptor.forClass(AccessDecision.class);
+        verify(accessAuditService).record(contextCaptor.capture(), decisionCaptor.capture());
+        assertThat(contextCaptor.getValue().messageSequence()).isEqualTo(8L);
+        assertThat(decisionCaptor.getValue().reason()).isEqualTo(AccessDecisionReason.REPLAYED_MESSAGE);
+    }
+
+    @Test
     void deniesAnExplicitDenyPolicy() {
         when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001"))
                 .thenReturn(Optional.of(device(DeviceStatus.ACTIVE)));
@@ -179,7 +213,24 @@ class ZeroTrustDecisionServiceTest {
                 null,
                 null,
                 resource,
-                action
+                action,
+                null
+        );
+    }
+
+    private AccessContext mqttContext(String deviceCode, Long sequence) {
+        return new AccessContext(
+                null,
+                "mqtt:" + deviceCode,
+                UserRole.DEVICE,
+                AccessChannel.MQTT,
+                deviceCode,
+                null,
+                null,
+                null,
+                "device-telemetry",
+                PolicyAction.WRITE,
+                sequence
         );
     }
 

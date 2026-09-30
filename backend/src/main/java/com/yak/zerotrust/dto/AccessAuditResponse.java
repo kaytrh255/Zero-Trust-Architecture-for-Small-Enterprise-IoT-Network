@@ -24,6 +24,7 @@ public record AccessAuditResponse(
         PolicyAction action,
         AccessDecisionOutcome decision,
         AccessDecisionReason reason,
+        Long messageSequence,
         Long matchedPolicyId,
         String matchedPolicyName,
         Instant evaluatedAt

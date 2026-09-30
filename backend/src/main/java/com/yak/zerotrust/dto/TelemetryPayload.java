@@ -4,7 +4,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 public record TelemetryPayload(
-        String deviceToken,
+        Long sequence,
         String metric,
         BigDecimal value,
         String unit,

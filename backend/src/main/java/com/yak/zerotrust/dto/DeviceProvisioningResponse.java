@@ -1,8 +1,9 @@
 package com.yak.zerotrust.dto;
 
-/** Contains a device token only when it is first issued or rotated. */
+/** MQTT credentials are returned only when the broker account is created or rotated. */
 public record DeviceProvisioningResponse(
         DeviceResponse device,
-        String deviceToken
+        String mqttUsername,
+        String mqttPassword
 ) {
 }

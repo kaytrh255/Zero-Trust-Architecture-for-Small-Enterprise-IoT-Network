@@ -47,6 +47,7 @@ class ProtectedResourceServiceTest {
         List<TelemetryResponse> samples = List.of(new TelemetryResponse(
                 12L,
                 "SENSOR-001",
+                1L,
                 "temperature",
                 new BigDecimal("22.5"),
                 "C",

@@ -28,6 +28,9 @@ public class DeviceTelemetry {
     @Column(name = "device_code", nullable = false, length = 64)
     private String deviceCode;
 
+    @Column(name = "device_sequence", nullable = false)
+    private long deviceSequence;
+
     @Column(nullable = false, length = 64)
     private String metric;
 
@@ -52,6 +55,7 @@ public class DeviceTelemetry {
     public DeviceTelemetry(
             Device device,
             String deviceCode,
+            long deviceSequence,
             String metric,
             BigDecimal value,
             String unit,
@@ -61,6 +65,7 @@ public class DeviceTelemetry {
     ) {
         this.device = device;
         this.deviceCode = deviceCode;
+        this.deviceSequence = deviceSequence;
         this.metric = metric;
         this.value = value;
         this.unit = unit;
@@ -79,6 +84,10 @@ public class DeviceTelemetry {
 
     public String getDeviceCode() {
         return deviceCode;
+    }
+
+    public long getDeviceSequence() {
+        return deviceSequence;
     }
 
     public String getMetric() {

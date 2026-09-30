@@ -15,3 +15,7 @@
 
 # Logs
 *.log
+
+# Locally generated MQTT TLS private keys, certificates, and serial files
+/mosquitto/tls/*
+!/mosquitto/tls/.gitkeep

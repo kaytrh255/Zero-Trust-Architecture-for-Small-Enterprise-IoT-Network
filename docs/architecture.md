@@ -7,18 +7,19 @@ The project is a modular monolith: one Spring Boot application owns REST APIs, a
 ## Local deployment
 
 ```text
-curl / Postman                  Simulated IoT publisher
-      |                                   |
-      | HTTP + bearer JWT                 | MQTT + shared broker login + device token
-      v                                   v
-Spring Boot application <----------> Mosquitto (127.0.0.1:1883)
-  ├── AuthController / AuthService            └── iot/telemetry/{deviceCode}
-  ├── JwtAuthenticationFilter
-  ├── DeviceController / DeviceService
+curl / Postman                         Simulated IoT publisher
+      |                                           |
+      | HTTP + bearer JWT                         | MQTT/TLS + device username/password/client ID
+      v                                           v
+Spring Boot application <====== verified TLS ======> Mosquitto :8883
+  ├── AuthController / AuthService                 ├── Dynamic Security plugin
+  ├── JwtAuthenticationFilter                     ├── per-device publish ACL: iot/telemetry/%u
+  ├── DeviceController / DeviceService             └── backend-only subscribe role: iot/telemetry/+
+  ├── MqttDynamicSecurityService
   ├── PolicyController / PolicyService
   ├── AccessController / ZeroTrustDecisionService
   ├── ProtectedResourceController / ProtectedResourceService
-  ├── DeviceCredentialService / AccessAuditService / TelemetryIngestionService
+  ├── AccessAuditService / TelemetryIngestionService
   ├── repositories / Flyway migrations
   └── TelemetryQueryService
       |
@@ -26,6 +27,8 @@ Spring Boot application <----------> Mosquitto (127.0.0.1:1883)
       v
 PostgreSQL (Docker volume)
 ```
+
+The broker exposes no plaintext MQTT listener. Compose generates a local CA and a broker certificate with `mosquitto`, `localhost`, and `127.0.0.1` SAN entries. Backend MQTT clients trust that CA and enable hostname verification. These generated development certificates are ignored by Git.
 
 ## Authentication request path
 
@@ -57,20 +60,32 @@ GET /api/resources/devices/{deviceCode}/telemetry
   -> ALLOW: query and return that registered device's samples
 ```
 
-The API returns a policy decision for the demo request; it is not a reverse proxy or general enforcement layer for arbitrary IoT services. Access checks are attributed to the authenticated user. Policy subject and device state come from the registered device, not the request payload. API requester roles `USER` and `DEVICE` are evaluated; management roles get a recorded business DENY.
+The API returns a policy decision for the demo request; it is not a reverse proxy or general enforcement layer for arbitrary IoT services. Access checks are attributed to the authenticated user. Policy subject and device state come from the registered device, not the request payload. API requester roles `USER` and `DEVICE` are evaluated; management roles get a recorded business DENY. The protected-resource path names the target device; the JWT supplies requester identity. No device-ownership check is implemented.
 
-## MQTT telemetry path
+## MQTT identity, TLS, and telemetry path
 
 ```text
-publisher -> shared local broker login + per-device token -> Mosquitto -> Paho subscriber
-  -> validate topic/payload -> match token hash to the topic device code
-  -> invalid token: audit unauthenticated DENY; no policy evaluation/storage
-  -> ZeroTrustDecisionService(device-telemetry, WRITE)
-  -> denied: audit only; allowed: save telemetry and update last_seen_at
+POST /api/devices or credential rotation
+  -> generate a 256-bit random password
+  -> MqttDynamicSecurityService provisions username=deviceCode,
+     fixed mqttClientId, and zt-device-publisher role over verified TLS
+  -> disclose mqttUsername/mqttPassword once
+
+publisher -> verified TLS + unique device credentials -> broker ACL
+  -> only iot/telemetry/{same username} publish permitted
+  -> Paho backend subscriber (separate restricted broker account)
+  -> validate topic/payload and require positive sequence
+  -> lock device row -> device status -> explicit policy DENY/default DENY
+  -> reject sequence <= last accepted sequence, otherwise advance high-water mark
+  -> audit decision; store telemetry only after ALLOW
 ```
 
-Mosquitto is bound to host loopback, rejects anonymous clients, and reads a password file generated from `.env`. The backend reconnects and resubscribes through Eclipse Paho. Each device also receives a random bearer token; only a BCrypt hash is stored and create/rotate APIs disclose the token once. The subscriber verifies the token against the device named in the topic before trusting that device context. The broker still uses one shared local account and has no per-device topic ACLs; tokens travel in non-TLS MQTT payloads and can be replayed until rotation.
+Mosquitto Dynamic Security denies anonymous clients, keeps publishing/subscribing denied unless an ACL grants it, and restricts a device role to `publishClientSend iot/telemetry/%u`. The backend subscriber has a separate role for `iot/telemetry/+`; it does not use the administrative broker identity. The admin account is used only for provisioning and bootstrap. Disabling/revoking a device disables its broker client; activation re-enables it. Device code and MQTT client ID are immutable after provisioning so the broker identity/ACL binding cannot silently drift.
+
+The telemetry body no longer contains an authentication secret. It contains a positive, monotonically increasing per-device `sequence`, metric, value, unit, and optional `measuredAt`. The row lock serializes concurrent checks, `last_mqtt_sequence` is advanced in the same transaction as the access audit and telemetry insert, and a unique `(device_id, device_sequence)` constraint is a second replay/duplicate guard. A repeated or lower sequence receives `DENY` / `REPLAYED_MESSAGE`; policy DENY and inactive-device checks remain in force.
+
+The MQTT broker username is authenticated by Mosquitto, and its `%u` ACL binds the permitted topic to that username. This prototype does not add device ownership enforcement to the protected HTTP resource path and does not verify application-level message signatures.
 
 ## Persistence
 
-Flyway migrations `V1__create_users.sql` through `V5__bind_device_credentials.sql` define the schema and demo rules. V4 adds access decision history, accepted telemetry, indexes, foreign keys, and sensor/camera telemetry-write ALLOW examples. V5 adds hashed device credentials and an invalid-credential audit reason. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.
+Flyway migrations `V1__create_users.sql` through `V6__broker_mqtt_identity_tls_and_replay_protection.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.

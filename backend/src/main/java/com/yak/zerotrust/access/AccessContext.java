@@ -16,7 +16,8 @@ public record AccessContext(
         DeviceType deviceType,
         DeviceStatus deviceStatus,
         String resource,
-        PolicyAction action
+        PolicyAction action,
+        Long messageSequence
 ) {
 
     public AccessContext withDevice(Device device) {
@@ -30,7 +31,8 @@ public record AccessContext(
                 device.getDeviceType(),
                 device.getStatus(),
                 resource,
-                action
+                action,
+                messageSequence
         );
     }
 }

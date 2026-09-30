@@ -43,8 +43,8 @@ public class Device {
     @Column(name = "mqtt_client_id", nullable = false, length = 100)
     private String mqttClientId;
 
-    @Column(name = "mqtt_credential_hash", length = 100)
-    private String mqttCredentialHash;
+    @Column(name = "last_mqtt_sequence", nullable = false)
+    private long lastMqttSequence;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
@@ -105,8 +105,11 @@ public class Device {
         this.status = status;
     }
 
-    public void replaceMqttCredentialHash(String mqttCredentialHash) {
-        this.mqttCredentialHash = mqttCredentialHash;
+    public void recordMqttSequence(long sequence) {
+        if (sequence <= lastMqttSequence) {
+            throw new IllegalArgumentException("MQTT sequence must advance monotonically");
+        }
+        lastMqttSequence = sequence;
     }
 
     public void recordTelemetryReceived(Instant receivedAt) {
@@ -137,8 +140,8 @@ public class Device {
         return mqttClientId;
     }
 
-    public String getMqttCredentialHash() {
-        return mqttCredentialHash;
+    public long getLastMqttSequence() {
+        return lastMqttSequence;
     }
 
     public DeviceStatus getStatus() {

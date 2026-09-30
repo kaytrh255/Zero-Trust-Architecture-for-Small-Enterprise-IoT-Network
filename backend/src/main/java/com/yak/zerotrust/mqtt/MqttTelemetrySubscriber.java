@@ -33,6 +33,7 @@ public class MqttTelemetrySubscriber {
     private final String password;
     private final String topicFilter;
     private final String clientId;
+    private final javax.net.ssl.SSLSocketFactory sslSocketFactory;
     private final ScheduledExecutorService reconnectExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "mqtt-reconnect");
         thread.setDaemon(true);
@@ -48,7 +49,8 @@ public class MqttTelemetrySubscriber {
             @Value("${mqtt.username:}") String username,
             @Value("${mqtt.password:}") String password,
             @Value("${mqtt.telemetry-topic}") String topicFilter,
-            @Value("${mqtt.client-id}") String clientId
+            @Value("${mqtt.client-id}") String clientId,
+            @Value("${mqtt.ca-file}") String caFile
     ) {
         this.telemetryIngestionService = telemetryIngestionService;
         this.brokerUrl = brokerUrl;
@@ -56,6 +58,7 @@ public class MqttTelemetrySubscriber {
         this.password = password;
         this.topicFilter = topicFilter;
         this.clientId = clientId;
+        this.sslSocketFactory = MqttTlsSupport.createSocketFactory(caFile);
     }
 
     @PostConstruct
@@ -111,6 +114,8 @@ public class MqttTelemetrySubscriber {
         options.setCleanSession(true);
         options.setConnectionTimeout(5);
         options.setKeepAliveInterval(30);
+        options.setSocketFactory(sslSocketFactory);
+        options.setHttpsHostnameVerificationEnabled(true);
         if (!username.isBlank()) {
             options.setUserName(username);
         }

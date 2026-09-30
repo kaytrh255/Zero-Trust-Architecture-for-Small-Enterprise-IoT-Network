@@ -4,9 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yak.zerotrust.access.AccessChannel;
 import com.yak.zerotrust.access.AccessContext;
-import com.yak.zerotrust.access.AccessDecision;
 import com.yak.zerotrust.access.AccessDecisionOutcome;
-import com.yak.zerotrust.access.AccessDecisionReason;
 import com.yak.zerotrust.access.AccessEvaluation;
 import com.yak.zerotrust.dto.TelemetryPayload;
 import com.yak.zerotrust.entity.Device;
@@ -36,25 +34,18 @@ public class TelemetryIngestionService {
     );
     private static final Pattern METRIC_PATTERN = Pattern.compile("^[A-Za-z][A-Za-z0-9._-]{0,63}$");
     private static final Pattern UNIT_PATTERN = Pattern.compile("^[A-Za-z0-9%°./_-]{1,16}$");
-    private static final Pattern DEVICE_TOKEN_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{43}$");
 
     private final ObjectMapper objectMapper;
     private final ZeroTrustDecisionService zeroTrustDecisionService;
-    private final DeviceCredentialService deviceCredentialService;
-    private final AccessAuditService accessAuditService;
     private final DeviceTelemetryRepository telemetryRepository;
 
     public TelemetryIngestionService(
             ObjectMapper objectMapper,
             ZeroTrustDecisionService zeroTrustDecisionService,
-            DeviceCredentialService deviceCredentialService,
-            AccessAuditService accessAuditService,
             DeviceTelemetryRepository telemetryRepository
     ) {
         this.objectMapper = objectMapper;
         this.zeroTrustDecisionService = zeroTrustDecisionService;
-        this.deviceCredentialService = deviceCredentialService;
-        this.accessAuditService = accessAuditService;
         this.telemetryRepository = telemetryRepository;
     }
 
@@ -64,31 +55,23 @@ public class TelemetryIngestionService {
         TelemetryPayload payload = parsePayload(payloadBytes);
         validatePayload(payload);
 
-        Device authenticatedDevice = deviceCredentialService
-                .authenticate(deviceCode, payload.deviceToken())
-                .orElse(null);
-        if (authenticatedDevice == null) {
-            auditInvalidDeviceCredential(deviceCode);
-            log.info("MQTT telemetry denied for device {}: invalid device credential", deviceCode);
-            return false;
-        }
-
         AccessContext accessContext = new AccessContext(
                 null,
-                "mqtt:" + authenticatedDevice.getDeviceCode(),
+                "mqtt:" + deviceCode,
                 UserRole.DEVICE,
                 AccessChannel.MQTT,
-                authenticatedDevice.getDeviceCode(),
-                authenticatedDevice.getId(),
-                authenticatedDevice.getDeviceType(),
-                authenticatedDevice.getStatus(),
+                deviceCode,
+                null,
+                null,
+                null,
                 "device-telemetry",
-                PolicyAction.WRITE
+                PolicyAction.WRITE,
+                payload.sequence()
         );
         AccessEvaluation evaluation = zeroTrustDecisionService.evaluate(accessContext);
         if (evaluation.decision().decision() != AccessDecisionOutcome.ALLOW) {
-            log.info("MQTT telemetry denied for device {}: {}",
-                    deviceCode, evaluation.decision().reason());
+            log.info("MQTT telemetry denied for device {} at sequence {}: {}",
+                    deviceCode, payload.sequence(), evaluation.decision().reason());
             return false;
         }
 
@@ -106,6 +89,7 @@ public class TelemetryIngestionService {
         telemetryRepository.save(new DeviceTelemetry(
                 device,
                 device.getDeviceCode(),
+                payload.sequence(),
                 metric,
                 payload.value(),
                 unit,
@@ -136,38 +120,9 @@ public class TelemetryIngestionService {
         }
     }
 
-    private void auditInvalidDeviceCredential(String deviceCode) {
-        Instant evaluatedAt = Instant.now();
-        AccessContext context = new AccessContext(
-                null,
-                "mqtt:unauthenticated",
-                UserRole.DEVICE,
-                AccessChannel.MQTT,
-                deviceCode,
-                null,
-                null,
-                null,
-                "device-telemetry",
-                PolicyAction.WRITE
-        );
-        AccessDecision decision = new AccessDecision(
-                null,
-                AccessDecisionOutcome.DENY,
-                AccessDecisionReason.INVALID_DEVICE_CREDENTIAL,
-                deviceCode,
-                "device-telemetry",
-                PolicyAction.WRITE,
-                null,
-                null,
-                evaluatedAt
-        );
-        accessAuditService.record(context, decision);
-    }
-
     private void validatePayload(TelemetryPayload payload) {
-        if (payload == null || payload.deviceToken() == null
-                || !DEVICE_TOKEN_PATTERN.matcher(payload.deviceToken()).matches()) {
-            throw new IllegalArgumentException("Telemetry device token is missing or invalid");
+        if (payload == null || payload.sequence() == null || payload.sequence() <= 0) {
+            throw new IllegalArgumentException("Telemetry sequence must be a positive integer");
         }
         if (payload.metric() == null || !METRIC_PATTERN.matcher(payload.metric().trim()).matches()) {
             throw new IllegalArgumentException("Telemetry metric is missing or invalid");

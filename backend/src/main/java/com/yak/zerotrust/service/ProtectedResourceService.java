@@ -39,7 +39,8 @@ public class ProtectedResourceService {
                 null,
                 null,
                 "sensor-data",
-                PolicyAction.READ
+                PolicyAction.READ,
+                null
         );
         AccessEvaluation evaluation = zeroTrustDecisionService.evaluate(context);
         if (evaluation.decision().decision() != AccessDecisionOutcome.ALLOW) {

@@ -26,7 +26,10 @@ public record DeviceRequest(
         String ipAddress,
 
         @NotBlank(message = "MQTT client ID is required")
-        @Size(max = 100, message = "MQTT client ID must be at most 100 characters")
+        @Pattern(
+                regexp = "^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$",
+                message = "MQTT client ID must use letters, numbers, dot, underscore, or hyphen"
+        )
         String mqttClientId
 ) {
 }

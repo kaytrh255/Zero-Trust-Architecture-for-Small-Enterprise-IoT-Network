@@ -38,7 +38,8 @@ public class AccessController {
                 null,
                 null,
                 request.resource(),
-                request.action()
+                request.action(),
+                null
         );
         return zeroTrustDecisionService.evaluate(context).decision();
     }

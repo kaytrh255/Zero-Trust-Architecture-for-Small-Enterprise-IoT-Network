@@ -45,7 +45,7 @@ Send the token from login in the `Authorization` header. Returns the current use
 
 ## Devices
 
-Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the request cannot assign another owner. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Device code and MQTT client ID must be unique.
+Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the request cannot assign another owner. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Device code and MQTT client ID must be unique. Both are immutable after provisioning because the broker username/topic ACL and client-ID binding use them.
 
 ### `GET /api/devices` — `ADMIN`, `SECURITY_ANALYST`
 
@@ -69,15 +69,25 @@ Request:
 }
 ```
 
-Returns HTTP `201 Created` with `{ "device": { ...safe device fields... }, "deviceToken": "<one-time token>" }`. The token is random, returned only once, and its BCrypt hash is stored. Types: `SENSOR`, `CAMERA`, `ACTUATOR`, `GATEWAY`.
+Returns HTTP `201 Created` with safe device fields plus one-time broker credentials:
+
+```json
+{
+  "device": { "id": 3, "deviceCode": "SENSOR-003", "mqttClientId": "SENSOR-003" },
+  "mqttUsername": "SENSOR-003",
+  "mqttPassword": "<random 256-bit password>"
+}
+```
+
+The backend provisions a Mosquitto Dynamic Security client and assigns the least-privilege device publishing role before returning. The password is not persisted by the backend and is not returned again. Types: `SENSOR`, `CAMERA`, `ACTUATOR`, `GATEWAY`.
 
 ### `POST /api/devices/{id}/credentials/rotate` — `ADMIN`
 
-Returns HTTP `200 OK`, issues a new random MQTT application token for that device, returns it once, and invalidates the previous token. Use this route to provision the bootstrapped demo devices or recover a lost token. The response uses the same shape as device creation.
+Returns HTTP `200 OK`, replaces the broker password, and returns the username/password once. The previous password becomes invalid. Use this route to provision the bootstrapped demo devices or recover a lost credential. The new password is provisioned with the device's fixed client ID and current status.
 
 ### `PUT /api/devices/{id}` — `ADMIN`
 
-Replaces the device code and editable details using the same request body as POST. Status and owner are not changed by this endpoint.
+Updates the device name, type, and IP address using the same request shape as POST. `deviceCode` and `mqttClientId` must remain unchanged; attempts to change either return HTTP `409 CONFLICT`. Status and owner are not changed by this endpoint.
 
 ### `PATCH /api/devices/{id}/status` — `ADMIN`
 
@@ -89,11 +99,11 @@ Request:
 }
 ```
 
-Allowed statuses: `ACTIVE`, `INACTIVE`, `BLOCKED`, `REVOKED`.
+Allowed statuses: `ACTIVE`, `INACTIVE`, `BLOCKED`, `REVOKED`. A non-`ACTIVE` status disables the matching broker account (if provisioned); `ACTIVE` re-enables it. The backend still checks status on every delivered telemetry message.
 
 ### `DELETE /api/devices/{id}` — `ADMIN`
 
-Returns HTTP `204 No Content` and sets the device to `REVOKED`; the row is retained rather than physically removed.
+Returns HTTP `204 No Content`, sets the device to `REVOKED`, and disables its broker account; the row is retained rather than physically removed.
 
 ## Policies
 
@@ -161,27 +171,11 @@ Decision order:
 4. Evaluate enabled exact subject/resource/action policies; explicit matching `DENY` wins.
 5. If no rule matches, return default `DENY` (`NO_MATCHING_POLICY`).
 
-An evaluated `ALLOW` or `DENY` returns HTTP `200 OK`:
-
-```json
-{
-  "auditId": 17,
-  "decision": "ALLOW",
-  "reason": "POLICY_ALLOW",
-  "deviceCode": "SENSOR-001",
-  "resource": "sensor-data",
-  "action": "READ",
-  "matchedPolicyId": 1,
-  "matchedPolicyName": "Sensor Read Data",
-  "evaluatedAt": "2026-09-29T10:00:00Z"
-}
-```
-
-Other reasons: `EXPLICIT_DENY`, `NO_MATCHING_POLICY`, `DEVICE_NOT_FOUND`, `DEVICE_NOT_ACTIVE`, and `REQUESTER_ROLE_NOT_ALLOWED`. No matching policy defaults to DENY. Authentication failures still return `401`; invalid request fields return `400` before decision evaluation.
+An evaluated `ALLOW` or `DENY` returns HTTP `200 OK` with decision, reason, policy snapshot, timestamp, and audit ID. Authentication failures return `401`; invalid request fields return `400` before decision evaluation.
 
 ### `GET /api/access/audits` — `ADMIN`, `SECURITY_ANALYST`
 
-Returns up to the most recent 100 evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, matching-policy snapshot, and time. Every valid API decision, evaluated MQTT telemetry attempt, and syntactically valid MQTT message with an invalid device token is stored in `access_audits`; malformed requests rejected before evaluation are not.
+Returns up to the most recent 100 evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, optional MQTT `messageSequence`, matching-policy snapshot, and time. Evaluated MQTT replay attempts have reason `REPLAYED_MESSAGE` and include the repeated sequence. Broker authentication/ACL failures and malformed MQTT messages rejected before policy evaluation are in Mosquitto/backend logs, not `access_audits`.
 
 ## Protected telemetry resource (Phase 6)
 
@@ -193,31 +187,31 @@ This is a protected demo resource route, not just a decision check. The API deri
 - `DENY`: HTTP `403`, with the denied `accessDecision` and an empty telemetry array. No telemetry query is run.
 - Missing/invalid JWT: HTTP `401`.
 
-For the seeded rules, an active sensor is allowed, the blocked `SENSOR-002` is denied by status, and `CAMERA-001` is denied because it has no `sensor-data` / `READ` policy. The decision and denial are audited.
+For the seeded rules, an active sensor is allowed, the blocked `SENSOR-002` is denied by status, and `CAMERA-001` is denied because it has no `sensor-data` / `READ` policy. The JWT identifies the requester; the path's device code names the target device. There is no per-user device-ownership check.
 
-## MQTT telemetry (Phase 6)
+## MQTT telemetry (Phase 7)
 
-The local Mosquitto broker still requires the shared local MQTT username/password configured in `.env` and listens on the host loopback interface. The backend subscribes to `iot/telemetry/+`; the topic suffix must match the device code whose application token is in the body.
+The local Compose broker listens on loopback TLS port `8883` only. MQTT clients must trust `mosquitto/tls/ca.crt` and verify the broker hostname. No plaintext `1883` listener is configured. The backend subscriber uses a dedicated restricted account; device clients use their own broker credentials and fixed MQTT client IDs.
+
+`POST /api/devices` and `POST /api/devices/{id}/credentials/rotate` return `mqttUsername` (the uppercase `deviceCode`) and a random `mqttPassword` once. Mosquitto Dynamic Security checks username/password/client ID and assigns the device a role that can publish only to `iot/telemetry/{that username}`. The backend subscriber can subscribe/receive only on `iot/telemetry/+`. Anonymous connections, unmatched subscriptions/publishes/receives, and retained messages are disabled/denied. Broker-level authentication/ACL failures occur before backend ingestion and are not database access-audit events.
 
 Message body:
 
 ```json
 {
-  "deviceToken": "<one-time token returned when the device is created/rotated>",
+  "sequence": 1,
   "metric": "temperature",
   "value": 22.5,
   "unit": "C",
-  "measuredAt": "2026-09-29T10:00:00Z"
+  "measuredAt": "2026-09-30T10:00:00Z"
 }
 ```
 
-`deviceToken` is a random 256-bit bearer credential issued once by `POST /api/devices` or `POST /api/devices/{id}/credentials/rotate`. Only its BCrypt hash is stored. Tokens are bound to the registered device code: using a token on another device's topic is rejected. Rotating a token invalidates the previous one. `measuredAt` is optional; when omitted, receive time is used. The payload is limited to 2048 bytes and validates the token, metric, numeric precision, unit, and timestamp.
-
-After credential validation, each message is checked as a `DEVICE`/`MQTT` request for `device-telemetry` / `WRITE`. Only an `ALLOW` for an `ACTIVE` registered sensor/camera is stored; policy/status DENY is audited and the telemetry row is not written. A well-formed message with an invalid token is also audited as `INVALID_DEVICE_CREDENTIAL` without attributing it to the claimed device. Malformed topics/payloads are logged and discarded before policy evaluation. Accepted messages update `devices.last_seen_at`.
+`sequence` is required, positive, and strictly greater than that device's last accepted sequence. The backend row-locks the device and performs the existing `ACTIVE` status and `device-telemetry` / `WRITE` policy checks before accepting a new sequence. Explicit policy DENY and no-match default DENY remain in force. A repeated/lower sequence is audited as `DENY` / `REPLAYED_MESSAGE`; it is not stored. The sequence high-water update and telemetry insert are in one transaction, and `(device_id, device_sequence)` is unique. Existing Phase 6 telemetry is assigned increasing per-device sequences by Flyway V6; start new publishers after the migrated high-water mark. `measuredAt` is optional; receive time is used when omitted. Payload size is limited to 2048 bytes.
 
 ### `GET /api/telemetry` — `ADMIN`, `SECURITY_ANALYST`
 
-Returns the most recent 100 accepted telemetry samples. The device token authenticates at the application ingestion layer; the broker still uses a shared local login and does not apply per-device topic ACLs. MQTT is non-TLS in this local Compose setup, so tokens should not be used over an untrusted network.
+Returns the most recent 100 accepted telemetry samples, including `deviceSequence`. MQTT credential secrets are owned by Mosquitto Dynamic Security; PostgreSQL stores the current accepted sequence, not a plaintext MQTT password.
 
 ## Error responses
 
@@ -225,7 +219,7 @@ Validation, authentication, authorization, and application errors use a consiste
 
 ```json
 {
-  "timestamp": "2026-09-29T10:00:00Z",
+  "timestamp": "2026-09-30T10:00:00Z",
   "status": 403,
   "error": "ACCESS_DENIED",
   "message": "You do not have permission to perform this operation",
@@ -233,6 +227,6 @@ Validation, authentication, authorization, and application errors use a consiste
 }
 ```
 
-Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role or a DENY at the protected telemetry route, `404` missing resource, `409` duplicate identifier/name, and `500` unexpected server error. A DENY from `POST /api/access/check` is an HTTP `200` decision body. A protected resource DENY is HTTP `403` with a `ProtectedTelemetryResponse` containing the access decision and an empty telemetry array, not an `ApiError` body.
+Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role or a DENY at the protected telemetry route, `404` missing resource, `409` duplicate/immutable identity, and `500` unexpected server error. A DENY from `POST /api/access/check` is an HTTP `200` decision body. A protected resource DENY is HTTP `403` with a `ProtectedTelemetryResponse` containing the access decision and an empty telemetry array, not an `ApiError` body.
 
-API authentication and policy-change audits, dashboard endpoints, TLS, broker-side per-device MQTT logins/topic ACLs, and transparent enforcement on arbitrary IoT resources are not implemented yet.
+API authentication and policy-change audits, dashboard endpoints, application-level MQTT message signatures, and transparent enforcement on arbitrary IoT resources are not implemented.

@@ -35,6 +35,7 @@ public class TelemetryQueryService {
         return new TelemetryResponse(
                 telemetry.getId(),
                 telemetry.getDeviceCode(),
+                telemetry.getDeviceSequence(),
                 telemetry.getMetric(),
                 telemetry.getValue(),
                 telemetry.getUnit(),

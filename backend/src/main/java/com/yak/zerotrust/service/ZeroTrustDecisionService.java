@@ -1,5 +1,6 @@
 package com.yak.zerotrust.service;
 
+import com.yak.zerotrust.access.AccessChannel;
 import com.yak.zerotrust.access.AccessContext;
 import com.yak.zerotrust.access.AccessDecision;
 import com.yak.zerotrust.access.AccessDecisionOutcome;
@@ -46,13 +47,13 @@ public class ZeroTrustDecisionService {
         AccessContext context = registeredDevice
                 .map(normalizedContext::withDevice)
                 .orElse(normalizedContext);
-        AccessDecision decision = decide(context);
+        AccessDecision decision = decide(context, registeredDevice.orElse(null));
 
         AccessAudit savedAudit = accessAuditService.record(context, decision);
         return new AccessEvaluation(decision.withAuditId(savedAudit.getId()), registeredDevice.orElse(null));
     }
 
-    private AccessDecision decide(AccessContext context) {
+    private AccessDecision decide(AccessContext context, Device registeredDevice) {
         Instant evaluatedAt = Instant.now();
         if (!isRequesterRoleAllowed(context)) {
             return deny(context, AccessDecisionReason.REQUESTER_ROLE_NOT_ALLOWED, null, evaluatedAt);
@@ -77,6 +78,15 @@ public class ZeroTrustDecisionService {
         if (policy.getEffect() == PolicyEffect.DENY) {
             return deny(context, AccessDecisionReason.EXPLICIT_DENY, policy, evaluatedAt);
         }
+
+        if (context.channel() == AccessChannel.MQTT
+                && context.messageSequence() != null) {
+            if (registeredDevice == null || context.messageSequence() <= registeredDevice.getLastMqttSequence()) {
+                return deny(context, AccessDecisionReason.REPLAYED_MESSAGE, policy, evaluatedAt);
+            }
+            registeredDevice.recordMqttSequence(context.messageSequence());
+        }
+
         return new AccessDecision(
                 null,
                 AccessDecisionOutcome.ALLOW,
@@ -127,7 +137,8 @@ public class ZeroTrustDecisionService {
                 context.deviceType(),
                 context.deviceStatus(),
                 context.resource().trim().toLowerCase(Locale.ROOT),
-                context.action()
+                context.action(),
+                context.messageSequence()
         );
     }
 }

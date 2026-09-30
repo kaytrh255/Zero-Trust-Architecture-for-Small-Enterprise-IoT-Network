@@ -68,6 +68,9 @@ public class AccessAudit {
     @Column(nullable = false, length = 40)
     private AccessDecisionReason reason;
 
+    @Column(name = "message_sequence")
+    private Long messageSequence;
+
     @Column(name = "matched_policy_id")
     private Long matchedPolicyId;
 
@@ -93,6 +96,7 @@ public class AccessAudit {
         action = context.action();
         this.decision = decision.decision();
         reason = decision.reason();
+        messageSequence = context.messageSequence();
         matchedPolicyId = decision.matchedPolicyId();
         matchedPolicyName = decision.matchedPolicyName();
         evaluatedAt = decision.evaluatedAt();
@@ -155,6 +159,10 @@ public class AccessAudit {
 
     public AccessDecisionReason getReason() {
         return reason;
+    }
+
+    public Long getMessageSequence() {
+        return messageSequence;
     }
 
     public Long getMatchedPolicyId() {

@@ -20,46 +20,67 @@ services:
       retries: 10
       start_period: 5s
 
-  mqtt-credentials:
-    image: eclipse-mosquitto:2
+  mqtt-init:
+    image: zerotrust-mosquitto:2.0.22
+    build:
+      context: ./mosquitto
+      dockerfile: Dockerfile
     restart: "no"
     user: "0:0"
     environment:
-      MQTT_USERNAME: ${MQTT_USERNAME:?Set MQTT_USERNAME in .env}
-      MQTT_PASSWORD: ${MQTT_PASSWORD:?Set MQTT_PASSWORD in .env}
+      MQTT_DYNSEC_ADMIN_USERNAME: ${MQTT_DYNSEC_ADMIN_USERNAME:-admin}
+      MQTT_DYNSEC_ADMIN_PASSWORD: ${MQTT_DYNSEC_ADMIN_PASSWORD:?Set MQTT_DYNSEC_ADMIN_PASSWORD in .env}
     volumes:
       - mosquitto_data:/mosquitto/data
-    entrypoint: ["/bin/sh", "-c"]
-    command: >-
-      set -eu;
-      mosquitto_passwd -b -c /mosquitto/data/password_file "$$MQTT_USERNAME" "$$MQTT_PASSWORD";
-      chown -R 1883:1883 /mosquitto/data
+      - ./mosquitto/tls:/mosquitto/tls
+      - ./mosquitto/scripts/init-broker.sh:/mosquitto/scripts/init-broker.sh:ro
+    entrypoint: ["/bin/sh", "/mosquitto/scripts/init-broker.sh"]
 
   mosquitto:
-    image: eclipse-mosquitto:2
+    image: zerotrust-mosquitto:2.0.22
+    build:
+      context: ./mosquitto
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
-      mqtt-credentials:
+      mqtt-init:
         condition: service_completed_successfully
     environment:
-      MQTT_USERNAME: ${MQTT_USERNAME:?Set MQTT_USERNAME in .env}
-      MQTT_PASSWORD: ${MQTT_PASSWORD:?Set MQTT_PASSWORD in .env}
+      MQTT_DYNSEC_ADMIN_USERNAME: ${MQTT_DYNSEC_ADMIN_USERNAME:-admin}
+      MQTT_DYNSEC_ADMIN_PASSWORD: ${MQTT_DYNSEC_ADMIN_PASSWORD:?Set MQTT_DYNSEC_ADMIN_PASSWORD in .env}
     ports:
-      - "127.0.0.1:${MQTT_PORT:-1883}:1883"
+      - "127.0.0.1:${MQTT_PORT:-8883}:8883"
     volumes:
       - mosquitto_data:/mosquitto/data
       - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/tls:/mosquitto/tls:ro
     command: ["mosquitto", "-c", "/mosquitto/config/mosquitto.conf"]
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "mosquitto_pub -h 127.0.0.1 -p 1883 -u \"$$MQTT_USERNAME\" -P \"$$MQTT_PASSWORD\" -t zt/health -n"
+          "mosquitto_pub --cafile /mosquitto/tls/ca.crt -h 127.0.0.1 -p 8883 -u \"$$MQTT_DYNSEC_ADMIN_USERNAME\" -P \"$$MQTT_DYNSEC_ADMIN_PASSWORD\" -t '$$CONTROL/dynamic-security/v1' -m '{\"commands\":[{\"command\":\"getDefaultACLAccess\"}]}'"
         ]
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 5s
+
+  mqtt-bootstrap:
+    image: zerotrust-mosquitto:2.0.22
+    restart: "no"
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    environment:
+      MQTT_DYNSEC_ADMIN_USERNAME: ${MQTT_DYNSEC_ADMIN_USERNAME:-admin}
+      MQTT_DYNSEC_ADMIN_PASSWORD: ${MQTT_DYNSEC_ADMIN_PASSWORD:?Set MQTT_DYNSEC_ADMIN_PASSWORD in .env}
+      MQTT_BACKEND_USERNAME: ${MQTT_BACKEND_USERNAME:-zero-trust-backend}
+      MQTT_BACKEND_PASSWORD: ${MQTT_BACKEND_PASSWORD:?Set MQTT_BACKEND_PASSWORD in .env}
+    volumes:
+      - ./mosquitto/tls:/mosquitto/tls:ro
+      - ./mosquitto/scripts/bootstrap-security.sh:/mosquitto/scripts/bootstrap-security.sh:ro
+    entrypoint: ["/bin/sh", "/mosquitto/scripts/bootstrap-security.sh"]
 
   backend:
     build:
@@ -69,8 +90,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      mosquitto:
-        condition: service_healthy
+      mqtt-bootstrap:
+        condition: service_completed_successfully
     environment:
       SERVER_PORT: 8080
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-zerotrust}
@@ -81,11 +102,16 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_FULL_NAME: ${ADMIN_FULL_NAME:-Zero Trust Administrator}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
-      MQTT_BROKER_URL: tcp://mosquitto:1883
-      MQTT_USERNAME: ${MQTT_USERNAME:?Set MQTT_USERNAME in .env}
-      MQTT_PASSWORD: ${MQTT_PASSWORD:?Set MQTT_PASSWORD in .env}
+      MQTT_BROKER_URL: ssl://mosquitto:8883
+      MQTT_BACKEND_USERNAME: ${MQTT_BACKEND_USERNAME:-zero-trust-backend}
+      MQTT_BACKEND_PASSWORD: ${MQTT_BACKEND_PASSWORD:?Set MQTT_BACKEND_PASSWORD in .env}
+      MQTT_DYNSEC_ADMIN_USERNAME: ${MQTT_DYNSEC_ADMIN_USERNAME:-admin}
+      MQTT_DYNSEC_ADMIN_PASSWORD: ${MQTT_DYNSEC_ADMIN_PASSWORD:?Set MQTT_DYNSEC_ADMIN_PASSWORD in .env}
+      MQTT_CA_FILE: /mosquitto/tls/ca.crt
       MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-zero-trust-backend}
       MQTT_TELEMETRY_TOPIC: ${MQTT_TELEMETRY_TOPIC:-iot/telemetry/+}
+    volumes:
+      - ./mosquitto/tls:/mosquitto/tls:ro
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
 

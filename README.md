@@ -4,24 +4,23 @@
 
 **Course project:** MDGS04 Information Security
 
-A modular-monolith prototype demonstrating **Never Trust, Always Verify**. The project is built incrementally so each component can be run and understood before the next is added.
+A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work is delivered incrementally so each component can be run and understood before the next is added.
 
 ## Current implementation
 
-- **Phase 1:** Java 21 / Spring Boot foundation, PostgreSQL, Docker Compose, and database-aware health endpoint.
-- **Phase 2:** user registration, BCrypt password hashing, JWT login/validation, and protected current-user endpoint.
-- **Phase 3:** device persistence, role-protected CRUD, and device status management.
-- **Phase 4:** policy persistence/CRUD, seeded rules, and deterministic exact-match policy selection.
-- **Phase 5:** authenticated access checks, device-status enforcement, default-deny decisions, access audit records, and policy-gated MQTT telemetry ingestion.
-- **Phase 6:** one-time, per-device MQTT tokens; token rotation; rejection/auditing of unauthenticated telemetry; and a protected telemetry resource that returns data only after an ALLOW decision.
+- **Phases 1–4:** Java 21 / Spring Boot, PostgreSQL / Flyway, Docker Compose, user registration/JWT, device management, and exact-match policy CRUD.
+- **Phase 5:** authenticated access decisions, device-status validation, explicit DENY precedence, default DENY, access-audit records, and policy-gated MQTT telemetry ingestion.
+- **Phase 6:** a real policy-gated protected telemetry read route. The JWT supplies requester identity; the path names the target device. No device-ownership check is implemented.
+- **Phase 7:** per-device Mosquitto Dynamic Security usernames/passwords and topic ACLs, TLS with a locally generated trusted CA and hostname verification, broker account enable/disable with device status, and monotonic sequence replay protection with audit/database persistence.
 
-The protected route and telemetry subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
+The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
 
 ## Requirements
 
 - Docker Engine / Docker Desktop
 - Docker Compose v2 (`docker compose`)
 - `curl` (PowerShell users can use `curl.exe`)
+- `mosquitto_pub` for host-side MQTT checks (install the Mosquitto client package)
 - Optional for unit tests directly: Java 21 and Maven 3.9+
 
 ## Run with Docker Compose
@@ -32,13 +31,13 @@ From the repository root, create a local environment file if you do not already 
 cp .env.example .env
 ```
 
-Set a local signing key in `.env` before starting Compose:
+Set a JWT signing key in `.env`:
 
 ```bash
 openssl rand -base64 32
 ```
 
-Put the generated value after `JWT_SECRET=`. Replace all sample passwords, including `MQTT_PASSWORD`, before using the demo. Keep `.env` private; it is ignored by Git. If you already have a `.env` from an earlier phase, add the `MQTT_USERNAME`, `MQTT_PASSWORD`, and `MQTT_PORT` settings without overwriting credentials you need to retain.
+Put the generated value after `JWT_SECRET=`. Replace the sample application, PostgreSQL, Dynamic Security administrator, and backend MQTT passwords before using the demo. Keep `.env` private; Git ignores it. Existing `.env` files from Phase 6 need the new `MQTT_DYNSEC_ADMIN_USERNAME`, `MQTT_DYNSEC_ADMIN_PASSWORD`, `MQTT_BACKEND_USERNAME`, and `MQTT_BACKEND_PASSWORD` values; the old shared `MQTT_USERNAME` / `MQTT_PASSWORD` settings are no longer used.
 
 Start or rebuild the services:
 
@@ -47,7 +46,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Compose runs PostgreSQL, a loopback-bound Mosquitto broker, and the backend. Flyway migrations create/update the users, devices (including per-device credential hashes), policies, access-audit, and telemetry tables. The backend bootstraps a local administrator and demo devices if they are missing.
+Compose runs PostgreSQL, an initialization step for local TLS/Dynamic Security, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. The `mqtt-init` and `mqtt-bootstrap` containers should finish with exit code `0`; they are one-shot setup services. Flyway creates/updates users, devices, policies, audits, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
 
 Check the backend and database:
 
@@ -75,7 +74,7 @@ curl -i -X POST http://localhost:8080/api/auth/register \
   -d '{"username":"student1","password":"StudentPass123!","fullName":"Student One"}'
 ```
 
-Log in as that user to get a token for `/api/access/check`:
+Log in as that user to get a token for `/api/access/check` and the protected telemetry resource:
 
 ```bash
 curl -i -X POST http://localhost:8080/api/auth/login \
@@ -104,23 +103,25 @@ curl -i http://localhost:8080/api/policies \
 
 Use `/api/policies` `POST`, `PUT /api/policies/{id}`, and `DELETE /api/policies/{id}` to manage rules. Choose a new unique name when creating a policy; for example, `Sensor Read Data Extra` is not one of the seeded names.
 
-## Provision an MQTT device credential (Phase 6)
+## Provision a per-device MQTT identity (Phases 6–7)
 
-Creating a device returns a random `deviceToken` once. For a bootstrapped device, get its ID as an administrator:
+List devices to find the ID of a bootstrapped device:
 
 ```bash
 curl -i http://localhost:8080/api/devices \
   -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
 ```
 
-Then rotate that device's token (replace `1` with its ID from the list):
+Rotate/provision its broker password (replace `1` with the listed ID):
 
 ```bash
 curl -i -X POST http://localhost:8080/api/devices/1/credentials/rotate \
   -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
 ```
 
-The response contains the safe device summary and the new `deviceToken`. Store it in the device's local secret store; the backend stores only a BCrypt hash and cannot show the token again. Rotating it immediately invalidates the previous token. Never commit the returned token or paste it into logs/issues.
+The response includes `mqttUsername` (the uppercase device code) and a random `mqttPassword`, both returned only on create/rotation. Save the password directly in the device's local secret store; do not commit or log it. Mosquitto Dynamic Security authenticates the username/password and fixed `mqttClientId`; PostgreSQL does not store the password. Rotation invalidates the previous broker password. Phase 6's `deviceToken` field in the telemetry body is retired; after upgrading, rotate each existing device credential to provision its broker account. A device code and MQTT client ID cannot be changed after provisioning; create a new device identity instead. Non-`ACTIVE`/revoked device status disables the corresponding broker client; setting the status back to `ACTIVE` re-enables it.
+
+For a device created with `POST /api/devices`, the broker account is provisioned immediately and the HTTP response has the same credential fields.
 
 ## Request an access decision (Phase 5)
 
@@ -142,76 +143,97 @@ Examples to exercise the decision order:
 - `SENSOR-002` + `sensor-data` + `READ` → `DENY` (`DEVICE_NOT_ACTIVE`), even though an allow rule exists; `SENSOR-002` is seeded `BLOCKED`.
 - An active device with no matching rule → `DENY` (`NO_MATCHING_POLICY`).
 - Unknown device code → `DENY` (`DEVICE_NOT_FOUND`).
-- `ADMIN` and `SECURITY_ANALYST` accounts manage or inspect the system but are not access-requester roles; their checks return `DENY` (`REQUESTER_ROLE_NOT_ALLOWED`). Use a registered `USER` for the API demonstration.
+- `ADMIN` and `SECURITY_ANALYST` accounts are not access-requester roles; their checks return `DENY` (`REQUESTER_ROLE_NOT_ALLOWED`). Use a registered `USER` for this demonstration.
 
 Decision order: requester role, registered device, `ACTIVE` status, matching enabled policy (explicit `DENY` before `ALLOW`), then default `DENY` when there is no match. Device type and status come from PostgreSQL, not the request body.
 
 ## Read a protected resource (Phase 6)
 
-`GET /api/resources/devices/{deviceCode}/telemetry` is a real enforcement point for the demo telemetry resource. It derives requester identity from the JWT, evaluates the fixed `sensor-data` / `READ` context, and queries telemetry only after `ALLOW`:
+`GET /api/resources/devices/{deviceCode}/telemetry` is an enforcement point for the demo telemetry resource. It derives requester identity from the JWT, evaluates the fixed `sensor-data` / `READ` context, and queries telemetry only after `ALLOW`:
 
 ```bash
 curl -i http://localhost:8080/api/resources/devices/SENSOR-001/telemetry \
   -H 'Authorization: Bearer PASTE_USER_TOKEN_HERE'
 ```
 
-`ALLOW` returns HTTP `200` with the access decision and up to 100 samples for that device. A denied decision returns HTTP `403`, includes its reason/audit ID, and returns an empty telemetry list; the telemetry repository is not queried. For example, `SENSOR-002` is blocked and `CAMERA-001` has no `sensor-data` read policy, so both requests must be denied. This is a sample API resource, not enforcement on arbitrary devices or network traffic.
+`ALLOW` returns HTTP `200` with the access decision and up to 100 samples for that target device. A denied decision returns HTTP `403`, includes its reason/audit ID, and returns an empty telemetry list; the telemetry repository is not queried. For example, `SENSOR-002` is blocked and `CAMERA-001` has no `sensor-data` read policy, so both requests must be denied. The path's device code names the target; the JWT supplies requester identity. **There is no device-ownership enforcement.**
 
-## Inspect access audits
+## Publish and inspect MQTT telemetry (Phase 7)
 
-Every evaluated access check, MQTT policy decision, and syntactically valid MQTT message with an invalid device token writes an `access_audits` row. `ADMIN` and `SECURITY_ANALYST` can retrieve the latest 100 records:
+The Mosquitto listener is bound to `127.0.0.1:8883`, uses verified TLS, and has no plaintext `1883` listener. Host-side MQTT clients must trust `mosquitto/tls/ca.crt`; do not use `--insecure`. Each device authenticates with its own username/password and registered client ID. Mosquitto's device ACL permits publishing only to `iot/telemetry/{same device username}`. The backend subscriber has a separate read-only role for `iot/telemetry/+`.
 
-```bash
-curl -i http://localhost:8080/api/access/audits \
-  -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
-```
-
-The record includes the requester/channel, device snapshot, resource/action, outcome/reason, matched policy snapshot, and evaluation timestamp. Malformed MQTT topics/payloads rejected before credential verification are logged by the subscriber but do not create access-audit rows. API authentication attempts and policy-management changes are not yet audited.
-
-## Publish and inspect MQTT telemetry (Phase 6)
-
-The Mosquitto listener is bound to `127.0.0.1` and still uses the shared local broker username/password from `.env` to protect the local broker. In addition, each device must present its own one-time `deviceToken` in the telemetry JSON. Obtain/rotate that token using the device-credential endpoint above. The backend subscribes to `iot/telemetry/+`.
-
-Set the device token you just provisioned, then publish:
+Using the `mqttUsername`, `mqttPassword`, and `mqttClientId` from the credential response, publish a message. Set a new, increasing sequence for every new accepted sample:
 
 ```bash
-export DEVICE_TOKEN='PASTE_SENSOR_001_DEVICE_TOKEN_HERE'
-docker compose exec -e DEVICE_TOKEN="$DEVICE_TOKEN" mosquitto sh -c 'mosquitto_pub -h localhost -p 1883 -u "$MQTT_USERNAME" -P "$MQTT_PASSWORD" -t iot/telemetry/SENSOR-001 -m "{\"deviceToken\":\"$DEVICE_TOKEN\",\"metric\":\"temperature\",\"value\":22.5,\"unit\":\"C\"}"'
+export MQTT_DEVICE_USERNAME='SENSOR-001'
+export MQTT_DEVICE_PASSWORD='PASTE_ONE_TIME_MQTT_PASSWORD_HERE'
+export MQTT_DEVICE_CLIENT_ID='SENSOR-001'
+export MQTT_SEQUENCE=1
+
+mosquitto_pub \
+  --cafile mosquitto/tls/ca.crt \
+  -h 127.0.0.1 -p "${MQTT_PORT:-8883}" \
+  -u "$MQTT_DEVICE_USERNAME" -P "$MQTT_DEVICE_PASSWORD" \
+  -i "$MQTT_DEVICE_CLIENT_ID" -q 1 \
+  -t "iot/telemetry/${MQTT_DEVICE_USERNAME}" \
+  -m "{\"sequence\":${MQTT_SEQUENCE},\"metric\":\"temperature\",\"value\":22.5,\"unit\":\"C\"}"
 ```
 
-The backend checks that the token hash matches the registered device named by the topic, then evaluates `device-telemetry` / `WRITE`. Only an authenticated, `ACTIVE` device with an enabled `ALLOW` policy can store the sample. Invalid device tokens create a DENY audit record; malformed topics/payloads are logged and discarded. Denied messages never become telemetry, and `last_seen_at` is updated only after an accepted sample. `ADMIN` and `SECURITY_ANALYST` can view the latest 100 samples:
+The message body has no token. `sequence` is required and positive. For the currently accepted high-water mark `N`, sequence `N+1` can be accepted; sequence `N` or lower is audited as `DENY` / `REPLAYED_MESSAGE` and is not stored. A QoS 1 publish may be accepted by Mosquitto but later denied by the application's policy/replay decision; MQTT publish success alone does not mean the telemetry was persisted.
+
+Read stored samples and access audits with an administrator token:
 
 ```bash
 curl -i http://localhost:8080/api/telemetry \
   -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
+
+curl -i http://localhost:8080/api/access/audits \
+  -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
 ```
 
-## Phase 6 tester checklist
+Accepted telemetry includes `deviceSequence`. Evaluated policy/status/replay decisions appear in `access_audits`. Invalid TLS, username/password, client ID, or device-topic ACL attempts are rejected by Mosquitto before backend ingestion; check `docker compose logs mosquitto`, and do not expect an `access_audits` row for a message the backend never received. Malformed payloads are logged and discarded before decision evaluation.
 
-Use an authenticated `USER` token for the protected-resource checks and an `ADMIN` token for credential rotation/audit reads.
+## Phase 7 tester checklist
 
-| Tester action | Expected result |
+Use an `ADMIN` token for device credential provisioning, status/policy changes, and audit reads; use a `USER` token for the protected-resource checks.
+
+| Tester action | Exact expected result |
 |---|---|
-| Rotate the token for `SENSOR-001`, then publish a valid telemetry JSON using that token to `iot/telemetry/SENSOR-001`. | MQTT ingestion is ALLOW; telemetry is visible under `GET /api/telemetry`; `last_seen_at` advances. |
-| Publish a syntactically valid message with a wrong 43-character token. | No telemetry row is written; the audit contains `DENY` / `INVALID_DEVICE_CREDENTIAL` and requester `mqtt:unauthenticated`. |
-| Publish with `SENSOR-001`'s token to `iot/telemetry/CAMERA-001`. | Credential/topic mismatch is denied and audited; no camera telemetry is stored. |
-| Rotate the token again, then retry the previously valid token. | Old token is denied; only the new token works. |
-| `USER` reads `/api/resources/devices/SENSOR-001/telemetry`. | HTTP `200`, `ALLOW`, and only that device's samples. |
-| `USER` reads the route for `SENSOR-002` or `CAMERA-001`. | HTTP `403`, respectively `DEVICE_NOT_ACTIVE` or `NO_MATCHING_POLICY`, audit ID present, telemetry array empty. |
+| Rotate the `SENSOR-001` broker password, then connect over TLS with the returned username/password and client ID; publish sequence `1` to `iot/telemetry/SENSOR-001` (or a number above its reported database high-water mark). | TLS and broker authentication succeed; device ACL allows its own topic; backend evaluates status/policy as `ALLOW`; one telemetry row is added, `last_mqtt_sequence` advances, `last_seen_at` updates, and an `ALLOW` audit row is added. |
+| Re-publish the exact same sequence, or any lower sequence, with otherwise valid credentials/payload. | Broker accepts the authorized topic publish; backend returns no HTTP response to the publisher, does not insert telemetry or update `last_seen_at`, and records `DENY` / `REPLAYED_MESSAGE` with `messageSequence`. |
+| Use `SENSOR-001` credentials to publish to `iot/telemetry/CAMERA-001`. | Mosquitto ACL denies the publish before ingestion; no telemetry row and no database audit are added. Broker log records the denial. |
+| Use a wrong MQTT password or wrong client ID. | Broker rejects the connection; no telemetry or access-audit row. Mosquitto logs the authentication failure. |
+| Omit `--cafile` or supply an untrusted CA. | TLS verification fails before MQTT authentication; no telemetry or access-audit row. |
+| Provision `SENSOR-002` while it is `BLOCKED`, or set a provisioned device to `BLOCKED`/`REVOKED`. | Broker client is disabled; new MQTT connections are denied. A direct protected-resource request for `SENSOR-002` remains HTTP `403` / `DEVICE_NOT_ACTIVE` with an audit ID. |
+| Keep the device active but add an enabled `DENY` policy for its `device-telemetry` / `WRITE` action, then publish a new sequence. | Broker ACL allows the device's own topic, but the backend stores no sample and adds `DENY` / `EXPLICIT_DENY`. The sequence high-water mark does not advance. |
+| Disable/remove all matching telemetry policies and publish a new sequence. | Broker ACL allows the publish, but backend returns `DENY` / `NO_MATCHING_POLICY`; no telemetry row is written (default DENY). |
+| `USER` reads `/api/resources/devices/SENSOR-001/telemetry`. | HTTP `200` only when status and policy allow; data is for the requested target device. |
+| `USER` reads `/api/resources/devices/SENSOR-002/telemetry` or `CAMERA-001` with the seeded policy set. | HTTP `403`, respectively `DEVICE_NOT_ACTIVE` or `NO_MATCHING_POLICY`, audit ID present, telemetry array empty. This path does not enforce device ownership. |
 
-In all DENY cases, verify no new sample appears in `GET /api/telemetry`. The HTTP decision endpoint `/api/access/check` still returns business DENY with HTTP `200`; the protected resource route instead returns HTTP `403` and no data.
+Check sequence and telemetry persistence directly if desired:
+
+```bash
+docker compose exec postgres psql -U postgres -d zerotrust -c \
+  "SELECT device_code, last_mqtt_sequence, last_seen_at FROM devices ORDER BY device_code;"
+
+docker compose exec postgres psql -U postgres -d zerotrust -c \
+  "SELECT device_code, device_sequence, metric, metric_value FROM device_telemetry ORDER BY received_at DESC LIMIT 20;"
+```
+
+Every DENY case must leave telemetry unchanged. Broker authentication/topic-ACL failures are distinct from backend policy/status/replay denials: only the latter are database-audited. Existing telemetry was assigned a starting sequence during V6; query `last_mqtt_sequence` before choosing a first message after upgrading.
 
 ## Security locations and limitations
 
 - `JwtAuthenticationFilter` authenticates API callers and reloads current account status/role.
 - `AccessController` derives the requester from that principal; `ZeroTrustDecisionService` loads registered device state under a database row lock and combines it with `PolicyEvaluationService` results.
 - `ProtectedResourceService` evaluates the fixed telemetry read context before querying PostgreSQL; a DENY response contains no resource data.
-- `DeviceCredentialService` issues random per-device tokens, stores BCrypt hashes, and authenticates the topic's claimed device code against its registered credential. Create/rotate responses disclose the token once only.
-- `TelemetryIngestionService` checks the device token and then the same status/policy decision before persistence; invalid credentials are audited, and invalid or denied messages are not stored.
+- `MqttDynamicSecurityService` uses verified TLS and the dedicated Dynamic Security administrator to provision/rotate device credentials and enable/disable broker clients.
+- Mosquitto Dynamic Security binds each per-device username to the `iot/telemetry/%u` publish ACL; the backend subscriber uses a distinct least-privilege account.
+- `TelemetryIngestionService` validates payload shape and sequence, then applies the same active-status/policy decision. Accepted sequence advancement and telemetry persistence are atomic; repeated/lower sequences are audited and not stored.
 - `AccessAuditService` persists decisions; audit/telemetry read endpoints are restricted to `ADMIN` and `SECURITY_ANALYST`.
 - No role can override an explicit `DENY`; missing policies default to `DENY`.
 
-This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. The JWT identifies the API requester; the path's device code names the target resource and is not the requester identity. MQTT uses a per-device bearer token at the application ingestion layer, but clients still use one shared local broker login and Mosquitto does not enforce per-device topic ACLs. The token travels in the telemetry payload over local, non-TLS MQTT and can be replayed until rotated. TLS, broker-side per-device MQTT credentials/ACLs, message signing/replay protection, policy-change/API-authentication auditing, token expiry, rate limiting, and the dashboard remain future work.
+This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. In HTTP, the JWT identifies the requester and the path names the target device; there is no ownership check. MQTT uses per-device broker credentials/ACLs, TLS, and replay sequence checking, but no signed application payloads, credential expiry, automated CA rotation, MFA, rate limiting, policy-change/API-authentication auditing, or production secret management.
 
 ## Useful commands
 
@@ -221,13 +243,13 @@ View service logs:
 docker compose logs -f backend postgres mosquitto
 ```
 
-Stop services while retaining database data:
+Stop services while retaining database and broker data:
 
 ```bash
 docker compose down
 ```
 
-Reset the local database and MQTT volumes as well (this deletes local data):
+Reset the local database and broker security configuration (this deletes local database/broker data):
 
 ```bash
 docker compose down -v
@@ -246,31 +268,3 @@ mvn test
 - [Architecture](docs/architecture.md)
 - [API specification](docs/api.md)
 - [Security model](docs/security-model.md)
-
-## Repository structure
-
-```text
-.
-├── backend/
-│   ├── src/main/java/com/yak/zerotrust/
-│   │   ├── access/
-│   │   ├── controller/
-│   │   ├── dto/
-│   │   ├── entity/
-│   │   ├── exception/
-│   │   ├── mqtt/
-│   │   ├── policy/
-│   │   ├── repository/
-│   │   ├── security/
-│   │   └── service/
-│   ├── src/main/resources/db/migration/V1__...sql through V5__...sql
-│   ├── src/test/java/com/yak/zerotrust/
-│   ├── Dockerfile
-│   └── pom.xml
-├── docs/
-├── mosquitto/config/mosquitto.conf
-├── postgres/init/01-create-app-user.sh
-├── docker-compose.yml
-├── .env.example
-└── README.md
-```

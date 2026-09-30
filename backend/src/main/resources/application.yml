@@ -38,8 +38,12 @@ management:
       show-details: never
 
 mqtt:
-  broker-url: ${MQTT_BROKER_URL:tcp://localhost:1883}
-  username: ${MQTT_USERNAME:}
-  password: ${MQTT_PASSWORD:}
+  broker-url: ${MQTT_BROKER_URL:ssl://localhost:8883}
+  username: ${MQTT_BACKEND_USERNAME:}
+  password: ${MQTT_BACKEND_PASSWORD:}
+  ca-file: ${MQTT_CA_FILE:mosquitto/tls/ca.crt}
   client-id: ${MQTT_CLIENT_ID:zero-trust-backend}
   telemetry-topic: ${MQTT_TELEMETRY_TOPIC:iot/telemetry/+}
+  dynamic-security:
+    username: ${MQTT_DYNSEC_ADMIN_USERNAME:admin}
+    password: ${MQTT_DYNSEC_ADMIN_PASSWORD:}

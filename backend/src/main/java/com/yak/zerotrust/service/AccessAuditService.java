@@ -46,6 +46,7 @@ public class AccessAuditService {
                 audit.getAction(),
                 audit.getDecision(),
                 audit.getReason(),
+                audit.getMessageSequence(),
                 audit.getMatchedPolicyId(),
                 audit.getMatchedPolicyName(),
                 audit.getEvaluatedAt()

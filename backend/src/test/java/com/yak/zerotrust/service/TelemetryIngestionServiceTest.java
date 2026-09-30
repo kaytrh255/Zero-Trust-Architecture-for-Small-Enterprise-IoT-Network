@@ -1,6 +1,7 @@
 package com.yak.zerotrust.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yak.zerotrust.access.AccessChannel;
 import com.yak.zerotrust.access.AccessContext;
 import com.yak.zerotrust.access.AccessDecision;
 import com.yak.zerotrust.access.AccessDecisionOutcome;
@@ -22,7 +23,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -34,24 +34,15 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class TelemetryIngestionServiceTest {
 
-    private static final String DEVICE_TOKEN = "A".repeat(43);
-
     @Mock
     private ZeroTrustDecisionService zeroTrustDecisionService;
-
-    @Mock
-    private DeviceCredentialService deviceCredentialService;
-
-    @Mock
-    private AccessAuditService accessAuditService;
 
     @Mock
     private DeviceTelemetryRepository telemetryRepository;
 
     @Test
-    void persistsTelemetryOnlyAfterDeviceAuthenticationAndAnAllowDecision() {
+    void persistsTelemetryOnlyAfterAnAllowDecision() {
         Device device = device(DeviceStatus.ACTIVE);
-        when(deviceCredentialService.authenticate("SENSOR-001", DEVICE_TOKEN)).thenReturn(Optional.of(device));
         when(zeroTrustDecisionService.evaluate(any())).thenReturn(new AccessEvaluation(
                 decision(AccessDecisionOutcome.ALLOW, AccessDecisionReason.POLICY_ALLOW), device
         ));
@@ -59,7 +50,7 @@ class TelemetryIngestionServiceTest {
 
         boolean stored = service.ingestMqttMessage(
                 "iot/telemetry/sensor-001",
-                payload(DEVICE_TOKEN).getBytes(StandardCharsets.UTF_8)
+                payload(3).getBytes(StandardCharsets.UTF_8)
         );
 
         assertThat(stored).isTrue();
@@ -67,17 +58,19 @@ class TelemetryIngestionServiceTest {
         verify(telemetryRepository).save(telemetryCaptor.capture());
         assertThat(telemetryCaptor.getValue().getMetric()).isEqualTo("temperature");
         assertThat(telemetryCaptor.getValue().getDeviceCode()).isEqualTo("SENSOR-001");
+        assertThat(telemetryCaptor.getValue().getDeviceSequence()).isEqualTo(3L);
         assertThat(device.getLastSeenAt()).isNotNull();
         ArgumentCaptor<AccessContext> contextCaptor = ArgumentCaptor.forClass(AccessContext.class);
         verify(zeroTrustDecisionService).evaluate(contextCaptor.capture());
         assertThat(contextCaptor.getValue().requesterUsername()).isEqualTo("mqtt:SENSOR-001");
         assertThat(contextCaptor.getValue().deviceCode()).isEqualTo("SENSOR-001");
+        assertThat(contextCaptor.getValue().channel()).isEqualTo(AccessChannel.MQTT);
+        assertThat(contextCaptor.getValue().messageSequence()).isEqualTo(3L);
     }
 
     @Test
     void doesNotPersistTelemetryWhenTheDeviceIsDeniedByPolicyOrStatus() {
         Device device = device(DeviceStatus.BLOCKED);
-        when(deviceCredentialService.authenticate("SENSOR-002", DEVICE_TOKEN)).thenReturn(Optional.of(device));
         when(zeroTrustDecisionService.evaluate(any())).thenReturn(new AccessEvaluation(
                 decision(AccessDecisionOutcome.DENY, AccessDecisionReason.DEVICE_NOT_ACTIVE), device
         ));
@@ -85,7 +78,7 @@ class TelemetryIngestionServiceTest {
 
         boolean stored = service.ingestMqttMessage(
                 "iot/telemetry/SENSOR-002",
-                payload(DEVICE_TOKEN).getBytes(StandardCharsets.UTF_8)
+                payload(1).getBytes(StandardCharsets.UTF_8)
         );
 
         assertThat(stored).isFalse();
@@ -94,65 +87,42 @@ class TelemetryIngestionServiceTest {
     }
 
     @Test
-    void auditsInvalidDeviceCredentialsWithoutEvaluatingPolicyOrStoringData() {
-        when(deviceCredentialService.authenticate("SENSOR-001", DEVICE_TOKEN)).thenReturn(Optional.empty());
-        TelemetryIngestionService service = service();
-
-        boolean stored = service.ingestMqttMessage(
-                "iot/telemetry/SENSOR-001",
-                payload(DEVICE_TOKEN).getBytes(StandardCharsets.UTF_8)
-        );
-
-        assertThat(stored).isFalse();
-        verify(zeroTrustDecisionService, never()).evaluate(any());
-        verify(telemetryRepository, never()).save(any(DeviceTelemetry.class));
-        ArgumentCaptor<AccessContext> contextCaptor = ArgumentCaptor.forClass(AccessContext.class);
-        ArgumentCaptor<AccessDecision> decisionCaptor = ArgumentCaptor.forClass(AccessDecision.class);
-        verify(accessAuditService).record(contextCaptor.capture(), decisionCaptor.capture());
-        assertThat(contextCaptor.getValue().requesterUsername()).isEqualTo("mqtt:unauthenticated");
-        assertThat(decisionCaptor.getValue().decision()).isEqualTo(AccessDecisionOutcome.DENY);
-        assertThat(decisionCaptor.getValue().reason()).isEqualTo(AccessDecisionReason.INVALID_DEVICE_CREDENTIAL);
-    }
-
-    @Test
     void rejectsMessagesOutsideTheExpectedTopicNamespace() {
         TelemetryIngestionService service = service();
 
         assertThatThrownBy(() -> service.ingestMqttMessage(
                 "other/SENSOR-001",
-                payload(DEVICE_TOKEN).getBytes(StandardCharsets.UTF_8)
+                payload(1).getBytes(StandardCharsets.UTF_8)
         )).isInstanceOf(IllegalArgumentException.class);
 
-        verify(deviceCredentialService, never()).authenticate(any(), any());
-        verify(accessAuditService, never()).record(any(), any());
+        verify(zeroTrustDecisionService, never()).evaluate(any());
     }
 
     @Test
-    void rejectsTelemetryWithoutAValidDeviceToken() {
+    void rejectsMessagesWithoutAPositiveSequenceNumber() {
         TelemetryIngestionService service = service();
 
         assertThatThrownBy(() -> service.ingestMqttMessage(
                 "iot/telemetry/SENSOR-001",
-                payload("invalid").getBytes(StandardCharsets.UTF_8)
-        )).isInstanceOf(IllegalArgumentException.class);
+                payload(0).getBytes(StandardCharsets.UTF_8)
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("sequence");
 
-        verify(deviceCredentialService, never()).authenticate(any(), any());
-        verify(accessAuditService, never()).record(any(), any());
+        verify(zeroTrustDecisionService, never()).evaluate(any());
+        verify(telemetryRepository, never()).save(any(DeviceTelemetry.class));
     }
 
     private TelemetryIngestionService service() {
         return new TelemetryIngestionService(
                 new ObjectMapper(),
                 zeroTrustDecisionService,
-                deviceCredentialService,
-                accessAuditService,
                 telemetryRepository
         );
     }
 
-    private String payload(String token) {
-        return "{\"deviceToken\":\"" + token
-                + "\",\"metric\":\"Temperature\",\"value\":22.5,\"unit\":\"C\"}";
+    private String payload(long sequence) {
+        return "{\"sequence\":" + sequence
+                + ",\"metric\":\"Temperature\",\"value\":22.5,\"unit\":\"C\"}";
     }
 
     private AccessDecision decision(AccessDecisionOutcome outcome, AccessDecisionReason reason) {

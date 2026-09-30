@@ -9,6 +9,7 @@ import com.yak.zerotrust.entity.UserAccount;
 import com.yak.zerotrust.exception.DeviceConflictException;
 import com.yak.zerotrust.exception.DeviceNotFoundException;
 import com.yak.zerotrust.exception.UserNotFoundException;
+import com.yak.zerotrust.mqtt.MqttDynamicSecurityService;
 import com.yak.zerotrust.repository.DeviceRepository;
 import com.yak.zerotrust.repository.UserRepository;
 import org.springframework.stereotype.Service;
@@ -23,15 +24,18 @@ public class DeviceService {
     private final DeviceRepository deviceRepository;
     private final UserRepository userRepository;
     private final DeviceCredentialService deviceCredentialService;
+    private final MqttDynamicSecurityService mqttDynamicSecurityService;
 
     public DeviceService(
             DeviceRepository deviceRepository,
             UserRepository userRepository,
-            DeviceCredentialService deviceCredentialService
+            DeviceCredentialService deviceCredentialService,
+            MqttDynamicSecurityService mqttDynamicSecurityService
     ) {
         this.deviceRepository = deviceRepository;
         this.userRepository = userRepository;
         this.deviceCredentialService = deviceCredentialService;
+        this.mqttDynamicSecurityService = mqttDynamicSecurityService;
     }
 
     @Transactional(readOnly = true)
@@ -50,30 +54,39 @@ public class DeviceService {
     public DeviceProvisioningResponse create(DeviceRequest request, Long ownerId) {
         String deviceCode = normalizeCode(request.deviceCode());
         String mqttClientId = request.mqttClientId().trim();
-        ensureUnique(deviceCode, mqttClientId, null);
+        ensureUnique(deviceCode, mqttClientId);
 
         UserAccount owner = userRepository.findById(ownerId)
                 .orElseThrow(UserNotFoundException::new);
-        DeviceCredentialService.IssuedCredential credential = deviceCredentialService.issue();
-        Device device = new Device(
+        String mqttPassword = deviceCredentialService.issueMqttPassword();
+        Device savedDevice = deviceRepository.save(new Device(
                 deviceCode,
                 request.deviceName().trim(),
                 request.deviceType(),
                 request.ipAddress().trim(),
                 mqttClientId,
                 owner
+        ));
+        mqttDynamicSecurityService.provisionDevice(
+                savedDevice.getDeviceCode(),
+                savedDevice.getMqttClientId(),
+                mqttPassword,
+                savedDevice.getStatus() == DeviceStatus.ACTIVE
         );
-        device.replaceMqttCredentialHash(credential.passwordHash());
-        Device savedDevice = deviceRepository.save(device);
-        return new DeviceProvisioningResponse(toResponse(savedDevice), credential.token());
+        return provisioningResponse(savedDevice, mqttPassword);
     }
 
     @Transactional
     public DeviceProvisioningResponse rotateMqttCredential(Long id) {
         Device device = findDevice(id);
-        DeviceCredentialService.IssuedCredential credential = deviceCredentialService.issue();
-        device.replaceMqttCredentialHash(credential.passwordHash());
-        return new DeviceProvisioningResponse(toResponse(device), credential.token());
+        String mqttPassword = deviceCredentialService.issueMqttPassword();
+        mqttDynamicSecurityService.provisionDevice(
+                device.getDeviceCode(),
+                device.getMqttClientId(),
+                mqttPassword,
+                device.getStatus() == DeviceStatus.ACTIVE
+        );
+        return provisioningResponse(device, mqttPassword);
     }
 
     @Transactional
@@ -81,14 +94,16 @@ public class DeviceService {
         Device device = findDevice(id);
         String deviceCode = normalizeCode(request.deviceCode());
         String mqttClientId = request.mqttClientId().trim();
-        ensureUnique(deviceCode, mqttClientId, id);
+        if (!device.getDeviceCode().equals(deviceCode) || !device.getMqttClientId().equals(mqttClientId)) {
+            throw new DeviceConflictException("Device code and MQTT client ID cannot change after provisioning");
+        }
 
         device.updateDetails(
-                deviceCode,
+                device.getDeviceCode(),
                 request.deviceName().trim(),
                 request.deviceType(),
                 request.ipAddress().trim(),
-                mqttClientId
+                device.getMqttClientId()
         );
         return toResponse(device);
     }
@@ -97,6 +112,7 @@ public class DeviceService {
     public DeviceResponse updateStatus(Long id, DeviceStatus status) {
         Device device = findDevice(id);
         device.changeStatus(status);
+        mqttDynamicSecurityService.setDeviceEnabled(device.getDeviceCode(), status == DeviceStatus.ACTIVE);
         return toResponse(device);
     }
 
@@ -104,6 +120,7 @@ public class DeviceService {
     public void revoke(Long id) {
         Device device = findDevice(id);
         device.changeStatus(DeviceStatus.REVOKED);
+        mqttDynamicSecurityService.setDeviceEnabled(device.getDeviceCode(), false);
     }
 
     private Device findDevice(Long id) {
@@ -111,21 +128,19 @@ public class DeviceService {
                 .orElseThrow(() -> new DeviceNotFoundException(id));
     }
 
-    private void ensureUnique(String deviceCode, String mqttClientId, Long currentId) {
-        boolean codeExists = currentId == null
-                ? deviceRepository.existsByDeviceCode(deviceCode)
-                : deviceRepository.existsByDeviceCodeAndIdNot(deviceCode, currentId);
-        boolean mqttClientExists = currentId == null
-                ? deviceRepository.existsByMqttClientId(mqttClientId)
-                : deviceRepository.existsByMqttClientIdAndIdNot(mqttClientId, currentId);
-
-        if (codeExists || mqttClientExists) {
+    private void ensureUnique(String deviceCode, String mqttClientId) {
+        if (deviceRepository.existsByDeviceCode(deviceCode)
+                || deviceRepository.existsByMqttClientId(mqttClientId)) {
             throw new DeviceConflictException();
         }
     }
 
     private String normalizeCode(String deviceCode) {
         return deviceCode.trim().toUpperCase(Locale.ROOT);
+    }
+
+    private DeviceProvisioningResponse provisioningResponse(Device device, String mqttPassword) {
+        return new DeviceProvisioningResponse(toResponse(device), device.getDeviceCode(), mqttPassword);
     }
 
     private DeviceResponse toResponse(Device device) {

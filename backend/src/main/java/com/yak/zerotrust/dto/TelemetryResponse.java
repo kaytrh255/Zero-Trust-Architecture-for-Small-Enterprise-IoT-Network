@@ -6,6 +6,7 @@ import java.time.Instant;
 public record TelemetryResponse(
         Long id,
         String deviceCode,
+        long deviceSequence,
         String metric,
         BigDecimal value,
         String unit,

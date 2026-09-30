@@ -3,9 +3,11 @@ package com.yak.zerotrust.service;
 import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.entity.Device;
+import com.yak.zerotrust.exception.DeviceConflictException;
 import com.yak.zerotrust.entity.DeviceType;
 import com.yak.zerotrust.entity.UserAccount;
 import com.yak.zerotrust.entity.UserRole;
+import com.yak.zerotrust.mqtt.MqttDynamicSecurityService;
 import com.yak.zerotrust.repository.DeviceRepository;
 import com.yak.zerotrust.repository.UserRepository;
 import org.junit.jupiter.api.Test;
@@ -17,7 +19,11 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -33,31 +39,32 @@ class DeviceServiceTest {
     @Mock
     private DeviceCredentialService deviceCredentialService;
 
+    @Mock
+    private MqttDynamicSecurityService mqttDynamicSecurityService;
+
     @Test
-    void returnsTheNewDeviceTokenOnceAndPersistsOnlyItsHash() {
+    void createsABrokerClientAndReturnsItsCredentialsOnce() {
         UserAccount owner = new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true);
-        String deviceToken = "A".repeat(43);
+        String mqttPassword = "A".repeat(43);
         when(deviceRepository.existsByDeviceCode("SENSOR-003")).thenReturn(false);
         when(deviceRepository.existsByMqttClientId("SENSOR-003")).thenReturn(false);
         when(userRepository.findById(7L)).thenReturn(Optional.of(owner));
-        when(deviceCredentialService.issue()).thenReturn(
-                new DeviceCredentialService.IssuedCredential(deviceToken, "bcrypt-hash")
-        );
+        when(deviceCredentialService.issueMqttPassword()).thenReturn(mqttPassword);
         when(deviceRepository.save(any(Device.class))).thenAnswer(invocation -> invocation.getArgument(0));
-        DeviceService service = service();
 
-        DeviceProvisioningResponse response = service.create(request(), 7L);
+        DeviceProvisioningResponse response = service().create(request(), 7L);
 
-        assertThat(response.deviceToken()).isEqualTo(deviceToken);
+        assertThat(response.mqttUsername()).isEqualTo("SENSOR-003");
+        assertThat(response.mqttPassword()).isEqualTo(mqttPassword);
         assertThat(response.device().deviceCode()).isEqualTo("SENSOR-003");
+        verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", mqttPassword, true);
         ArgumentCaptor<Device> deviceCaptor = ArgumentCaptor.forClass(Device.class);
         verify(deviceRepository).save(deviceCaptor.capture());
-        assertThat(deviceCaptor.getValue().getMqttCredentialHash()).isEqualTo("bcrypt-hash");
-        assertThat(deviceCaptor.getValue().getMqttCredentialHash()).isNotEqualTo(deviceToken);
+        assertThat(deviceCaptor.getValue().getLastMqttSequence()).isZero();
     }
 
     @Test
-    void credentialRotationReplacesTheStoredHashAndReturnsTheNewSecretOnce() {
+    void rotationChangesTheBrokerPasswordAndReturnsItOnce() {
         Device device = new Device(
                 "SENSOR-003",
                 "Temperature Sensor 3",
@@ -66,21 +73,48 @@ class DeviceServiceTest {
                 "SENSOR-003",
                 new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true)
         );
-        device.replaceMqttCredentialHash("old-hash");
         when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
-        when(deviceCredentialService.issue()).thenReturn(
-                new DeviceCredentialService.IssuedCredential("B".repeat(43), "new-hash")
-        );
+        when(deviceCredentialService.issueMqttPassword()).thenReturn("B".repeat(43));
 
         DeviceProvisioningResponse response = service().rotateMqttCredential(3L);
 
-        assertThat(response.deviceToken()).isEqualTo("B".repeat(43));
-        assertThat(device.getMqttCredentialHash()).isEqualTo("new-hash");
-        assertThat(device.getMqttCredentialHash()).isNotEqualTo("old-hash");
+        assertThat(response.mqttUsername()).isEqualTo("SENSOR-003");
+        assertThat(response.mqttPassword()).isEqualTo("B".repeat(43));
+        verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", "B".repeat(43), true);
+    }
+
+    @Test
+    void preventsChangingBrokerIdentityAfterProvisioning() {
+        Device device = new Device(
+                "SENSOR-003",
+                "Temperature Sensor 3",
+                DeviceType.SENSOR,
+                "192.168.10.24",
+                "SENSOR-003",
+                new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true)
+        );
+        when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
+        DeviceRequest changedIdentity = new DeviceRequest(
+                "SENSOR-004",
+                "Temperature Sensor 3",
+                DeviceType.SENSOR,
+                "192.168.10.24",
+                "SENSOR-004"
+        );
+
+        assertThatThrownBy(() -> service().update(3L, changedIdentity))
+                .isInstanceOf(DeviceConflictException.class)
+                .hasMessageContaining("cannot change");
+        verify(mqttDynamicSecurityService, never()).provisionDevice(anyString(), anyString(), anyString(), anyBoolean());
     }
 
     private DeviceService service() {
-        return new DeviceService(deviceRepository, userRepository, deviceCredentialService);
+        return new DeviceService(
+                deviceRepository,
+                userRepository,
+                deviceCredentialService,
+                mqttDynamicSecurityService
+        );
     }
 
     private DeviceRequest request() {
