@@ -91,6 +91,19 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           done
 
+      - name: Annotate Phase 8 failure details
+        if: failure()
+        working-directory: backend
+        shell: bash
+        run: |
+          report=target/surefire-reports/com.yak.zerotrust.integration.Phase8ComposeIntegrationTest.txt
+          if [ ! -f "$report" ] || ! grep -Eq 'Failures: [1-9][0-9]*|Errors: [1-9][0-9]*' "$report"; then
+            exit 0
+          fi
+          detail="$(head -c 6000 "$report" | tr '\r\n' '  ' | tr -s ' ')"
+          detail="${detail//'%'/'%25'}"
+          echo "::error title=Phase 8 integration test failure::${detail}"
+
       - name: Dump Compose logs on failure
         if: failure()
         run: docker compose logs --no-color --timestamps || true
