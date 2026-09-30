@@ -59,8 +59,10 @@ class ZeroTrustDecisionServiceTest {
     }
 
     @Test
-    void allowsAnActiveDeviceWhenAnAllowPolicyMatches() {
-        Device device = device(DeviceStatus.ACTIVE);
+    void genericDecisionAllowsPolicyMatchWithoutApplyingDeviceOwnership() {
+        UserAccount owner = new UserAccount("another-user", "hash", "Another User", UserRole.USER, true);
+        setEntityId(owner, 8L);
+        Device device = device(DeviceStatus.ACTIVE, owner);
         when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
         Policy allow = policy("Sensor Read Data", "sensor-data", PolicyAction.READ, PolicyEffect.ALLOW);
         when(policyEvaluationService.findApplicablePolicy("SENSOR", "sensor-data", PolicyAction.READ))
@@ -75,6 +77,73 @@ class ZeroTrustDecisionServiceTest {
         assertThat(evaluation.decision().matchedPolicyName()).isEqualTo("Sensor Read Data");
         assertThat(evaluation.device()).isSameAs(device);
         verify(accessAuditService).record(any(AccessContext.class), any(AccessDecision.class));
+    }
+
+    @Test
+    void allowsTheDeviceOwnerWhenPolicyAllowsProtectedTelemetry() {
+        UserAccount owner = new UserAccount("student1", "hash", "Student One", UserRole.USER, true);
+        setEntityId(owner, 7L);
+        Device device = device(DeviceStatus.ACTIVE, owner);
+        when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
+        when(policyEvaluationService.findApplicablePolicy("SENSOR", "sensor-data", PolicyAction.READ))
+                .thenReturn(Optional.of(policy("Sensor Read Data", "sensor-data", PolicyAction.READ, PolicyEffect.ALLOW)));
+
+        AccessEvaluation evaluation = zeroTrustDecisionService.evaluateProtectedResource(apiContext(
+                UserRole.USER, "SENSOR-001", "sensor-data", PolicyAction.READ
+        ));
+
+        assertThat(evaluation.decision().decision()).isEqualTo(AccessDecisionOutcome.ALLOW);
+        assertThat(evaluation.decision().reason()).isEqualTo(AccessDecisionReason.POLICY_ALLOW);
+        assertThat(evaluation.device()).isSameAs(device);
+    }
+
+    @Test
+    void deniesAndAuditsANonOwnerEvenWhenProtectedResourcePolicyAllows() {
+        UserAccount owner = new UserAccount("another-user", "hash", "Another User", UserRole.USER, true);
+        setEntityId(owner, 8L);
+        Device device = device(DeviceStatus.ACTIVE, owner);
+        when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
+        when(policyEvaluationService.findApplicablePolicy("SENSOR", "sensor-data", PolicyAction.READ))
+                .thenReturn(Optional.of(policy("Sensor Read Data", "sensor-data", PolicyAction.READ, PolicyEffect.ALLOW)));
+
+        AccessEvaluation evaluation = zeroTrustDecisionService.evaluateProtectedResource(apiContext(
+                UserRole.USER, "SENSOR-001", "sensor-data", PolicyAction.READ
+        ));
+
+        assertThat(evaluation.decision().decision()).isEqualTo(AccessDecisionOutcome.DENY);
+        assertThat(evaluation.decision().reason()).isEqualTo(AccessDecisionReason.DEVICE_NOT_OWNED);
+        assertThat(evaluation.decision().matchedPolicyName()).isEqualTo("Sensor Read Data");
+        ArgumentCaptor<AccessDecision> decisionCaptor = ArgumentCaptor.forClass(AccessDecision.class);
+        verify(accessAuditService).record(any(AccessContext.class), decisionCaptor.capture());
+        assertThat(decisionCaptor.getValue().reason()).isEqualTo(AccessDecisionReason.DEVICE_NOT_OWNED);
+        assertThat(decisionCaptor.getValue().matchedPolicyName()).isEqualTo("Sensor Read Data");
+    }
+
+    @Test
+    void preservesExplicitDenyAndDefaultDenyBeforeOwnershipChecks() {
+        UserAccount owner = new UserAccount("another-user", "hash", "Another User", UserRole.USER, true);
+        setEntityId(owner, 8L);
+        Device device = device(DeviceStatus.ACTIVE, owner);
+        when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
+
+        Policy explicitDeny = policy("No Sensor Reads", "sensor-data", PolicyAction.READ, PolicyEffect.DENY);
+        when(policyEvaluationService.findApplicablePolicy("SENSOR", "sensor-data", PolicyAction.READ))
+                .thenReturn(Optional.of(explicitDeny));
+        AccessDecision explicitDecision = zeroTrustDecisionService.evaluateProtectedResource(apiContext(
+                UserRole.USER, "SENSOR-001", "sensor-data", PolicyAction.READ
+        )).decision();
+
+        assertThat(explicitDecision.decision()).isEqualTo(AccessDecisionOutcome.DENY);
+        assertThat(explicitDecision.reason()).isEqualTo(AccessDecisionReason.EXPLICIT_DENY);
+
+        when(policyEvaluationService.findApplicablePolicy("SENSOR", "sensor-data", PolicyAction.READ))
+                .thenReturn(Optional.empty());
+        AccessDecision defaultDecision = zeroTrustDecisionService.evaluateProtectedResource(apiContext(
+                UserRole.USER, "SENSOR-001", "sensor-data", PolicyAction.READ
+        )).decision();
+
+        assertThat(defaultDecision.decision()).isEqualTo(AccessDecisionOutcome.DENY);
+        assertThat(defaultDecision.reason()).isEqualTo(AccessDecisionReason.NO_MATCHING_POLICY);
     }
 
     @Test
@@ -240,7 +309,10 @@ class ZeroTrustDecisionServiceTest {
     }
 
     private Device device(DeviceStatus status) {
-        UserAccount owner = new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true);
+        return device(status, new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true));
+    }
+
+    private Device device(DeviceStatus status, UserAccount owner) {
         Device device = new Device(
                 status == DeviceStatus.BLOCKED ? "SENSOR-002" : "SENSOR-001",
                 "Test sensor",

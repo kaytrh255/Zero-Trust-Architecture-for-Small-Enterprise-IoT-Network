@@ -1,0 +1,9 @@
+ALTER TABLE access_audits
+    DROP CONSTRAINT ck_access_audits_reason;
+
+ALTER TABLE access_audits
+    ADD CONSTRAINT ck_access_audits_reason CHECK (reason IN (
+        'POLICY_ALLOW', 'EXPLICIT_DENY', 'NO_MATCHING_POLICY',
+        'DEVICE_NOT_FOUND', 'DEVICE_NOT_ACTIVE', 'DEVICE_NOT_OWNED',
+        'REQUESTER_ROLE_NOT_ALLOWED', 'INVALID_DEVICE_CREDENTIAL', 'REPLAYED_MESSAGE'
+    ));

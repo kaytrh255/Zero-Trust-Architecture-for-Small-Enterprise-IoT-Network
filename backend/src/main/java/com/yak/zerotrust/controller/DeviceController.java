@@ -1,5 +1,6 @@
 package com.yak.zerotrust.controller;
 
+import com.yak.zerotrust.dto.DeviceOwnerRequest;
 import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.dto.DeviceResponse;
@@ -74,6 +75,15 @@ public class DeviceController {
             @Valid @RequestBody DeviceStatusRequest request
     ) {
         return deviceService.updateStatus(id, request.status());
+    }
+
+    @PatchMapping("/{id}/owner")
+    @PreAuthorize("hasRole('ADMIN')")
+    public DeviceResponse transferOwnership(
+            @PathVariable Long id,
+            @Valid @RequestBody DeviceOwnerRequest request
+    ) {
+        return deviceService.transferOwnership(id, request.ownerUsername());
     }
 
     @DeleteMapping("/{id}")

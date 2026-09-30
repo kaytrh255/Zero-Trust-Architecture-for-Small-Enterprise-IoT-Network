@@ -56,11 +56,12 @@ POST /api/access/check (valid bearer JWT)
 
 GET /api/resources/devices/{deviceCode}/telemetry
   -> derive requester from JWT -> evaluate fixed sensor-data/READ request
-  -> DENY: return 403 + decision, never query telemetry
-  -> ALLOW: query and return that registered device's samples
+  -> check role, device, status, policy (explicit DENY/default DENY)
+  -> matching ALLOW + owner mismatch: audit DEVICE_NOT_OWNED, return 403
+  -> matching ALLOW + owner match: query and return that device's samples
 ```
 
-The API returns a policy decision for the demo request; it is not a reverse proxy or general enforcement layer for arbitrary IoT services. Access checks are attributed to the authenticated user. Policy subject and device state come from the registered device, not the request payload. API requester roles `USER` and `DEVICE` are evaluated; management roles get a recorded business DENY. The protected-resource path names the target device; the JWT supplies requester identity. No device-ownership check is implemented.
+The API returns a policy decision for `/api/access/check`; it is not a reverse proxy or general enforcement layer for arbitrary IoT services. Access checks are attributed to the authenticated user. Policy subject and device state come from the registered device, not the request payload. API requester roles `USER` and `DEVICE` are evaluated; management roles get a recorded business DENY. The protected-resource path names the target device; the JWT supplies requester identity. For protected reads, an enabled USER must match `devices.owner_id`. ADMINs assign/transfer device ownership; non-owner DENYs are audited and do not query telemetry. The decision-only `/api/access/check` endpoint does not fetch protected data or apply this ownership check.
 
 ## MQTT identity, TLS, and telemetry path
 
@@ -84,8 +85,8 @@ Mosquitto Dynamic Security denies anonymous clients and keeps publishing/subscri
 
 The telemetry body no longer contains an authentication secret. It contains a positive, monotonically increasing per-device `sequence`, metric, value, unit, and optional `measuredAt`. The row lock serializes concurrent checks, `last_mqtt_sequence` is advanced in the same transaction as the access audit and telemetry insert, and a unique `(device_id, device_sequence)` constraint is a second replay/duplicate guard. A repeated or lower sequence receives `DENY` / `REPLAYED_MESSAGE`; policy DENY and inactive-device checks remain in force.
 
-Mosquitto authenticates the MQTT username and assigns that device a role with a literal ACL for its registered topic. This prototype does not add device ownership enforcement to the protected HTTP resource path and does not verify application-level message signatures.
+Mosquitto authenticates the MQTT username and assigns that device a role with a literal ACL for its registered topic. HTTP device ownership applies only to the protected telemetry read route; MQTT ingestion remains governed by broker identity/ACLs, status, policy, and replay checks. The prototype does not verify application-level message signatures.
 
 ## Persistence
 
-Flyway migrations `V1__create_users.sql` through `V6__broker_mqtt_identity_tls_and_replay_protection.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.
+Flyway migrations `V1__create_users.sql` through `V7__add_device_ownership_denial_reason.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed audit reasons. Device ownership itself is already represented by `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.

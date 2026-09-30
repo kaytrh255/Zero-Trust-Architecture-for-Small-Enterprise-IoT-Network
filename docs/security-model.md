@@ -14,9 +14,9 @@ The bootstrap administrator comes from local environment variables. Bootstrap ne
 
 - `ADMIN`: manage devices/policies and device MQTT credentials/status; read devices, policies, access audits, and telemetry.
 - `SECURITY_ANALYST`: read devices, policies, access audits, and telemetry.
-- `USER` / `DEVICE`: eligible requester roles for access-decision evaluation and policy-protected resource reads; they cannot manage policies/devices or read the unrestricted audit/telemetry history endpoints.
+- `USER` / `DEVICE`: eligible requester roles for API access-decision evaluation; protected telemetry reads additionally require an enabled `USER` owner. They cannot manage policies/devices or read the unrestricted audit/telemetry history endpoints.
 
-`POST /api/access/check` and the protected telemetry route derive requester ID/name/role from the bearer-token principal. The caller cannot claim another account or submit trusted device type/status. Management roles receive a recorded business `DENY` (`REQUESTER_ROLE_NOT_ALLOWED`) rather than overriding resource policy. The decision endpoint returns HTTP 200 for an evaluated DENY; the protected telemetry route returns HTTP 403 and no resource data on DENY. Missing/invalid authentication remains HTTP 401.
+`POST /api/access/check` and the protected telemetry route derive requester ID/name/role from the bearer-token principal. The caller cannot claim another account or submit trusted device type/status. Management roles receive a recorded business `DENY` (`REQUESTER_ROLE_NOT_ALLOWED`) rather than overriding resource policy. The decision endpoint returns HTTP 200 for an evaluated DENY; the protected telemetry route returns HTTP 403 and no resource data on DENY. For this route, an enabled `USER` must also own the target device; only an ADMIN can transfer ownership, and only to an enabled `USER`. The generic decision endpoint remains a policy demonstration and does not fetch protected data or enforce ownership. Missing/invalid authentication remains HTTP 401.
 
 ## Decision order and policy
 
@@ -27,8 +27,9 @@ The bootstrap administrator comes from local environment variables. Bootstrap ne
 3. Require status `ACTIVE`; `INACTIVE`, `BLOCKED`, and `REVOKED` are denied.
 4. Query enabled exact subject/resource/action policies. An explicit `DENY` is selected before `ALLOW`.
 5. If no policy matches, return default `DENY`.
-6. For an otherwise-allowed MQTT request, require a sequence greater than the device's last accepted sequence; stale/repeated messages are denied as `REPLAYED_MESSAGE`.
-7. Persist the outcome/reason and context in `access_audits`.
+6. For an otherwise-allowed protected-resource API read, require the JWT requester to match the device owner; otherwise return `DENY` (`DEVICE_NOT_OWNED`). This check does not apply to MQTT ingestion or the decision-only `/api/access/check` endpoint.
+7. For an otherwise-allowed MQTT request, require a sequence greater than the device's last accepted sequence; stale/repeated messages are denied as `REPLAYED_MESSAGE`.
+8. Persist the outcome/reason and context in `access_audits`.
 
 An MQTT high-water mark is advanced only for an allowed message and in the same database transaction as telemetry persistence. Device row locking serializes concurrent messages; the telemetry table also enforces uniqueness on `(device_id, device_sequence)`. A message denied by device status or policy is not persisted. Explicit policy DENY and default DENY retain precedence over replay acceptance.
 
@@ -52,6 +53,6 @@ The generated CA/certificates are for a local demo, not a PKI deployment. Keep `
 
 ## Audit and limitations
 
-Every evaluated API decision and MQTT policy/status/replay decision is recorded, including DENY outcomes. MQTT audit rows include the device sequence when one was evaluated. `GET /api/access/audits` and `GET /api/telemetry` are available only to `ADMIN` and `SECURITY_ANALYST`, with each endpoint capped at the latest 100 records. Broker authentication and ACL rejections, malformed MQTT messages rejected before decision evaluation, API authentication attempts, and policy-management changes are not access-audit events.
+Every evaluated API decision and MQTT policy/status/replay decision is recorded, including DENY outcomes. Protected-resource ownership failures are recorded as `DEVICE_NOT_OWNED` (including any matched ALLOW policy snapshot) before telemetry is queried. MQTT audit rows include the device sequence when one was evaluated. `GET /api/access/audits` and `GET /api/telemetry` are available only to `ADMIN` and `SECURITY_ANALYST`, with each endpoint capped at the latest 100 records. Broker authentication and ACL rejections, malformed MQTT messages rejected before decision evaluation, API authentication attempts, and policy-management changes are not access-audit events.
 
-The access-check endpoint remains a decision demonstration; `GET /api/resources/devices/{deviceCode}/telemetry` enforces this demo resource only, not arbitrary network traffic. In HTTP, the device code names the target resource while requester identity comes from the JWT; no per-user device-ownership rule is implemented. MQTT uses authenticated per-device broker credentials, per-device topic ACLs, verified TLS, and monotonic sequence replay detection, but no application-level message signature. Policy-change/API-authentication auditing, credential expiry, MFA, rate limiting, production secrets management, and enforcement on arbitrary resources are not implemented.
+The access-check endpoint remains a decision demonstration; `GET /api/resources/devices/{deviceCode}/telemetry` enforces ownership and policy for this demo resource only, not arbitrary network traffic. Device ownership is managed by ADMINs and applied to this protected HTTP route; it is not an MQTT ownership rule. MQTT uses authenticated per-device broker credentials, per-device topic ACLs, verified TLS, and monotonic sequence replay detection, but no application-level message signature. Policy-change/API-authentication auditing, credential expiry, MFA, rate limiting, production secrets management, and enforcement on arbitrary resources are not implemented.

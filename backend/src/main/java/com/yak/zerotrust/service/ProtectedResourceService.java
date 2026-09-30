@@ -42,7 +42,7 @@ public class ProtectedResourceService {
                 PolicyAction.READ,
                 null
         );
-        AccessEvaluation evaluation = zeroTrustDecisionService.evaluate(context);
+        AccessEvaluation evaluation = zeroTrustDecisionService.evaluateProtectedResource(context);
         if (evaluation.decision().decision() != AccessDecisionOutcome.ALLOW) {
             return new ProtectedTelemetryResponse(evaluation.decision(), List.of());
         }

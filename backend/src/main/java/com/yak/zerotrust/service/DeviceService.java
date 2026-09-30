@@ -6,8 +6,10 @@ import com.yak.zerotrust.dto.DeviceResponse;
 import com.yak.zerotrust.entity.Device;
 import com.yak.zerotrust.entity.DeviceStatus;
 import com.yak.zerotrust.entity.UserAccount;
+import com.yak.zerotrust.entity.UserRole;
 import com.yak.zerotrust.exception.DeviceConflictException;
 import com.yak.zerotrust.exception.DeviceNotFoundException;
+import com.yak.zerotrust.exception.InvalidDeviceOwnerException;
 import com.yak.zerotrust.exception.UserNotFoundException;
 import com.yak.zerotrust.mqtt.MqttDynamicSecurityService;
 import com.yak.zerotrust.repository.DeviceRepository;
@@ -110,6 +112,19 @@ public class DeviceService {
     public DeviceResponse updateStatus(Long id, DeviceStatus status) {
         Device device = findDevice(id);
         device.changeStatus(status);
+        return toResponse(device);
+    }
+
+    @Transactional
+    public DeviceResponse transferOwnership(Long id, String ownerUsername) {
+        Device device = findDevice(id);
+        String normalizedUsername = ownerUsername.trim().toLowerCase(Locale.ROOT);
+        UserAccount owner = userRepository.findByUsername(normalizedUsername)
+                .orElseThrow(UserNotFoundException::new);
+        if (owner.getRole() != UserRole.USER || !owner.isEnabled()) {
+            throw new InvalidDeviceOwnerException();
+        }
+        device.changeOwner(owner);
         return toResponse(device);
     }
 

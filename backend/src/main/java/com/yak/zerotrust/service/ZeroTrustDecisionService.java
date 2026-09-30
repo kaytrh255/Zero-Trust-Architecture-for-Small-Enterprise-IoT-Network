@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 
 @Service
@@ -40,6 +41,15 @@ public class ZeroTrustDecisionService {
 
     @Transactional
     public AccessEvaluation evaluate(AccessContext requestedContext) {
+        return evaluateInternal(requestedContext, false);
+    }
+
+    @Transactional
+    public AccessEvaluation evaluateProtectedResource(AccessContext requestedContext) {
+        return evaluateInternal(requestedContext, true);
+    }
+
+    private AccessEvaluation evaluateInternal(AccessContext requestedContext, boolean requireDeviceOwnership) {
         AccessContext normalizedContext = normalizeContext(requestedContext);
         Optional<Device> registeredDevice = isRequesterRoleAllowed(normalizedContext)
                 ? deviceRepository.findByDeviceCodeForUpdate(normalizedContext.deviceCode())
@@ -47,13 +57,17 @@ public class ZeroTrustDecisionService {
         AccessContext context = registeredDevice
                 .map(normalizedContext::withDevice)
                 .orElse(normalizedContext);
-        AccessDecision decision = decide(context, registeredDevice.orElse(null));
+        AccessDecision decision = decide(context, registeredDevice.orElse(null), requireDeviceOwnership);
 
         AccessAudit savedAudit = accessAuditService.record(context, decision);
         return new AccessEvaluation(decision.withAuditId(savedAudit.getId()), registeredDevice.orElse(null));
     }
 
-    private AccessDecision decide(AccessContext context, Device registeredDevice) {
+    private AccessDecision decide(
+            AccessContext context,
+            Device registeredDevice,
+            boolean requireDeviceOwnership
+    ) {
         Instant evaluatedAt = Instant.now();
         if (!isRequesterRoleAllowed(context)) {
             return deny(context, AccessDecisionReason.REQUESTER_ROLE_NOT_ALLOWED, null, evaluatedAt);
@@ -78,6 +92,9 @@ public class ZeroTrustDecisionService {
         if (policy.getEffect() == PolicyEffect.DENY) {
             return deny(context, AccessDecisionReason.EXPLICIT_DENY, policy, evaluatedAt);
         }
+        if (requireDeviceOwnership && !requesterOwnsDevice(context, registeredDevice)) {
+            return deny(context, AccessDecisionReason.DEVICE_NOT_OWNED, policy, evaluatedAt);
+        }
 
         if (context.channel() == AccessChannel.MQTT
                 && context.messageSequence() != null) {
@@ -98,6 +115,12 @@ public class ZeroTrustDecisionService {
                 policy.getName(),
                 evaluatedAt
         );
+    }
+
+    private boolean requesterOwnsDevice(AccessContext context, Device registeredDevice) {
+        return registeredDevice != null
+                && context.requesterId() != null
+                && Objects.equals(context.requesterId(), registeredDevice.getOwner().getId());
     }
 
     private boolean isRequesterRoleAllowed(AccessContext context) {

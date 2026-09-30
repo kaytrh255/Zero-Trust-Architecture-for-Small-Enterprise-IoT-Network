@@ -49,6 +49,14 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.CONFLICT, "CONFLICT", exception.getMessage(), request);
     }
 
+    @ExceptionHandler(InvalidDeviceOwnerException.class)
+    public ResponseEntity<ApiError> handleInvalidDeviceOwner(
+            InvalidDeviceOwnerException exception,
+            HttpServletRequest request
+    ) {
+        return error(HttpStatus.BAD_REQUEST, "INVALID_DEVICE_OWNER", exception.getMessage(), request);
+    }
+
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<ApiError> handleDataConflict(
             DataIntegrityViolationException exception,

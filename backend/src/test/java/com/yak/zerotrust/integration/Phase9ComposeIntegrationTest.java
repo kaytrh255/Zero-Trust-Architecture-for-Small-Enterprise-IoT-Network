@@ -19,6 +19,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -28,8 +29,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** End-to-end checks against an already running local Docker Compose stack. */
-@EnabledIfEnvironmentVariable(named = "PHASE8_INTEGRATION", matches = "true")
-class Phase8ComposeIntegrationTest {
+@EnabledIfEnvironmentVariable(named = "PHASE9_INTEGRATION", matches = "true")
+class Phase9ComposeIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(10);
@@ -38,36 +39,61 @@ class Phase8ComposeIntegrationTest {
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
-    private final String baseUrl = environment("PHASE8_BASE_URL", "http://127.0.0.1:8080");
+    private final String baseUrl = environment("PHASE9_BASE_URL", "http://127.0.0.1:8080");
     private final String brokerUri = environment(
-            "PHASE8_MQTT_BROKER_URI",
+            "PHASE9_MQTT_BROKER_URI",
             "ssl://127.0.0.1:" + environment("MQTT_PORT", "8883")
     );
-    private final Path caFile = Path.of(environment("PHASE8_MQTT_CA_FILE", "../mosquitto/tls/ca.crt"))
+    private final Path caFile = Path.of(environment("PHASE9_MQTT_CA_FILE", "../mosquitto/tls/ca.crt"))
             .toAbsolutePath();
 
     @Test
     @Timeout(value = 240, unit = TimeUnit.SECONDS)
     void composeStackEnforcesTlsBrokerAclStatusPolicyReplayAndProtectedResource() throws Exception {
         String adminToken = login(
-                environment("PHASE8_ADMIN_USERNAME", environment("ADMIN_USERNAME", "admin")),
-                requiredEnvironment("PHASE8_ADMIN_PASSWORD", "ADMIN_PASSWORD")
+                environment("PHASE9_ADMIN_USERNAME", environment("ADMIN_USERNAME", "admin")),
+                requiredEnvironment("PHASE9_ADMIN_PASSWORD", "ADMIN_PASSWORD")
         );
         HttpResult health = request("GET", "/actuator/health", null, null);
         assertStatus(health, 200);
         assertThat(health.body().path("status").asText()).isEqualTo("UP");
 
         String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase();
-        String sensorCode = "PHASE8-SENSOR-" + suffix;
-        String actuatorCode = "PHASE8-ACTUATOR-" + suffix;
+        String sensorCode = "PHASE9-SENSOR-" + suffix;
+        String actuatorCode = "PHASE9-ACTUATOR-" + suffix;
         String userSuffix = suffix.toLowerCase();
-        String userName = "phase8-" + userSuffix;
-        String userPassword = "Phase8!" + userSuffix + "Aa";
-        registerUser(userName, userPassword);
-        String userToken = login(userName, userPassword);
+        String ownerUsername = "phase9-owner-" + userSuffix;
+        String nonOwnerUsername = "phase9-outsider-" + userSuffix;
+        String ownerPassword = "Phase9!" + userSuffix + "Aa";
+        String nonOwnerPassword = "Phase9!outsider-" + userSuffix + "Aa";
+        registerUser(ownerUsername, ownerPassword);
+        registerUser(nonOwnerUsername, nonOwnerPassword);
+        String ownerToken = login(ownerUsername, ownerPassword);
+        String nonOwnerToken = login(nonOwnerUsername, nonOwnerPassword);
 
         DeviceCredentials originalSensor = createDevice(adminToken, sensorCode, "SENSOR");
+        HttpResult invalidOwnerChange = request(
+                "PATCH",
+                "/api/devices/" + originalSensor.deviceId() + "/owner",
+                adminToken,
+                JSON.createObjectNode().put("ownerUsername", "admin")
+        );
+        assertStatus(invalidOwnerChange, 400);
+        assertThat(getDevice(adminToken, originalSensor.deviceId()).path("ownerUsername").asText())
+                .isEqualTo("admin");
+
+        HttpResult forbiddenOwnerChange = request(
+                "PATCH",
+                "/api/devices/" + originalSensor.deviceId() + "/owner",
+                ownerToken,
+                JSON.createObjectNode().put("ownerUsername", nonOwnerUsername)
+        );
+        assertStatus(forbiddenOwnerChange, 403);
+
         DeviceCredentials sensor = rotateCredentials(adminToken, originalSensor);
+        transferOwnership(adminToken, sensor.deviceId(), ownerUsername);
+        assertThat(getDevice(adminToken, sensor.deviceId()).path("ownerUsername").asText())
+                .isEqualTo(ownerUsername);
         assertConnectionRejected(new DeviceCredentials(
                 originalSensor.deviceId(),
                 originalSensor.deviceCode(),
@@ -87,7 +113,7 @@ class Phase8ComposeIntegrationTest {
         String lastSeenAfterAllow = getDevice(adminToken, sensor.deviceId()).path("lastSeenAt").asText();
         assertThat(lastSeenAfterAllow).isNotBlank();
 
-        String otherDeviceCode = "PHASE8-OTHER-" + suffix;
+        String otherDeviceCode = "PHASE9-OTHER-" + suffix;
         tryPublish(sensor, otherDeviceCode, 1);
         assertNoAuditForDevice(adminToken, otherDeviceCode);
         assertNoTelemetry(adminToken, otherDeviceCode, null);
@@ -105,7 +131,7 @@ class Phase8ComposeIntegrationTest {
         assertThat(getDevice(adminToken, sensor.deviceId()).path("lastSeenAt").asText())
                 .isEqualTo(lastSeenAfterAllow);
         HttpResult blockedResource = request(
-                "GET", "/api/resources/devices/" + sensorCode + "/telemetry", userToken, null
+                "GET", "/api/resources/devices/" + sensorCode + "/telemetry", ownerToken, null
         );
         assertStatus(blockedResource, 403);
         assertThat(blockedResource.body().path("accessDecision").path("reason").asText())
@@ -138,29 +164,75 @@ class Phase8ComposeIntegrationTest {
         awaitAudit(adminToken, actuatorCode, "NO_MATCHING_POLICY", 1L);
         assertNoTelemetry(adminToken, actuatorCode, 1L);
 
+        HttpResult genericNonOwnerCheck = request(
+                "POST",
+                "/api/access/check",
+                nonOwnerToken,
+                JSON.createObjectNode()
+                        .put("deviceCode", sensorCode)
+                        .put("resource", "sensor-data")
+                        .put("action", "READ")
+        );
+        assertStatus(genericNonOwnerCheck, 200);
+        assertThat(genericNonOwnerCheck.body().path("decision").asText()).isEqualTo("ALLOW");
+        assertThat(genericNonOwnerCheck.body().path("reason").asText()).isEqualTo("POLICY_ALLOW");
+
         HttpResult defaultDeny = request(
                 "POST",
                 "/api/access/check",
-                userToken,
+                ownerToken,
                 JSON.createObjectNode()
                         .put("deviceCode", sensorCode)
-                        .put("resource", "phase8-no-matching-resource")
+                        .put("resource", "phase9-no-matching-resource")
                         .put("action", "READ")
         );
         assertStatus(defaultDeny, 200);
         assertThat(defaultDeny.body().path("decision").asText()).isEqualTo("DENY");
         assertThat(defaultDeny.body().path("reason").asText()).isEqualTo("NO_MATCHING_POLICY");
 
+        long protectedReadDenyPolicyId = createProtectedReadDenyPolicy(adminToken, suffix);
+        try {
+            HttpResult explicitReadDeny = request(
+                    "GET", "/api/resources/devices/" + sensorCode + "/telemetry", ownerToken, null
+            );
+            assertStatus(explicitReadDeny, 403);
+            assertThat(explicitReadDeny.body().path("accessDecision").path("reason").asText())
+                    .isEqualTo("EXPLICIT_DENY");
+            assertThat(explicitReadDeny.body().path("telemetry").size()).isZero();
+            assertThat(explicitReadDeny.body().path("accessDecision").path("auditId").isNumber()).isTrue();
+        } finally {
+            HttpResult deletePolicy = request(
+                    "DELETE", "/api/policies/" + protectedReadDenyPolicyId, adminToken, null
+            );
+            assertStatus(deletePolicy, 204);
+        }
+
         HttpResult protectedRead = request(
-                "GET", "/api/resources/devices/" + sensorCode + "/telemetry", userToken, null
+                "GET", "/api/resources/devices/" + sensorCode + "/telemetry", ownerToken, null
         );
         assertStatus(protectedRead, 200);
         assertThat(protectedRead.body().path("accessDecision").path("decision").asText()).isEqualTo("ALLOW");
         assertThat(protectedRead.body().path("telemetry").size()).isEqualTo(2);
         assertThat(protectedRead.body().path("accessDecision").path("auditId").isNumber()).isTrue();
 
+        HttpResult nonOwnerRead = request(
+                "GET", "/api/resources/devices/" + sensorCode + "/telemetry", nonOwnerToken, null
+        );
+        assertStatus(nonOwnerRead, 403);
+        assertThat(nonOwnerRead.body().path("accessDecision").path("reason").asText())
+                .isEqualTo("DEVICE_NOT_OWNED");
+        assertThat(nonOwnerRead.body().path("accessDecision").path("matchedPolicyId").isNumber()).isTrue();
+        long ownershipAuditId = nonOwnerRead.body().path("accessDecision").path("auditId").asLong();
+        assertThat(ownershipAuditId).isPositive();
+        assertThat(nonOwnerRead.body().path("telemetry").size()).isZero();
+        assertThat(audits(adminToken)).anySatisfy(row -> {
+            assertThat(row.path("id").asLong()).isEqualTo(ownershipAuditId);
+            assertThat(row.path("reason").asText()).isEqualTo("DEVICE_NOT_OWNED");
+            assertThat(row.path("deviceCode").asText()).isEqualTo(sensorCode);
+        });
+
         HttpResult protectedDefaultDeny = request(
-                "GET", "/api/resources/devices/CAMERA-001/telemetry", userToken, null
+                "GET", "/api/resources/devices/CAMERA-001/telemetry", ownerToken, null
         );
         assertStatus(protectedDefaultDeny, 403);
         assertThat(protectedDefaultDeny.body().path("accessDecision").path("reason").asText())
@@ -181,14 +253,14 @@ class Phase8ComposeIntegrationTest {
         JsonNode body = JSON.createObjectNode()
                 .put("username", username)
                 .put("password", password)
-                .put("fullName", "Phase 8 Integration User");
+                .put("fullName", "Phase 9 Integration User");
         assertStatus(request("POST", "/api/auth/register", null, body), 201);
     }
 
     private DeviceCredentials createDevice(String adminToken, String deviceCode, String type) throws Exception {
         JsonNode body = JSON.createObjectNode()
                 .put("deviceCode", deviceCode)
-                .put("deviceName", "Phase 8 " + type + " integration device")
+                .put("deviceName", "Phase 9 " + type + " integration device")
                 .put("deviceType", type)
                 .put("ipAddress", "192.168.250.8")
                 .put("mqttClientId", deviceCode);
@@ -202,6 +274,13 @@ class Phase8ComposeIntegrationTest {
                 response.path("mqttUsername").asText(),
                 response.path("mqttPassword").asText()
         );
+    }
+
+    private void transferOwnership(String adminToken, long deviceId, String ownerUsername) throws Exception {
+        JsonNode body = JSON.createObjectNode().put("ownerUsername", " " + ownerUsername.toUpperCase(Locale.ROOT) + " ");
+        HttpResult result = request("PATCH", "/api/devices/" + deviceId + "/owner", adminToken, body);
+        assertStatus(result, 200);
+        assertThat(result.body().path("ownerUsername").asText()).isEqualTo(ownerUsername);
     }
 
     private DeviceCredentials rotateCredentials(String adminToken, DeviceCredentials existing) throws Exception {
@@ -220,13 +299,27 @@ class Phase8ComposeIntegrationTest {
 
     private long createTelemetryDenyPolicy(String adminToken, String suffix) throws Exception {
         JsonNode body = JSON.createObjectNode()
-                .put("name", "Phase 8 telemetry deny " + suffix)
+                .put("name", "Phase 9 telemetry deny " + suffix)
                 .put("subject", "SENSOR")
                 .put("resource", "device-telemetry")
                 .put("action", "WRITE")
                 .put("effect", "DENY")
                 .put("enabled", true)
-                .put("description", "Temporary Phase 8 integration-test policy");
+                .put("description", "Temporary Phase 9 integration-test policy");
+        HttpResult result = request("POST", "/api/policies", adminToken, body);
+        assertStatus(result, 201);
+        return result.body().path("id").asLong();
+    }
+
+    private long createProtectedReadDenyPolicy(String adminToken, String suffix) throws Exception {
+        JsonNode body = JSON.createObjectNode()
+                .put("name", "Phase 9 protected read deny " + suffix)
+                .put("subject", "SENSOR")
+                .put("resource", "sensor-data")
+                .put("action", "READ")
+                .put("effect", "DENY")
+                .put("enabled", true)
+                .put("description", "Temporary Phase 9 protected-resource DENY policy");
         HttpResult result = request("POST", "/api/policies", adminToken, body);
         assertStatus(result, 201);
         return result.body().path("id").asLong();
@@ -243,7 +336,7 @@ class Phase8ComposeIntegrationTest {
             client.connect(connectOptions(credentials, true));
             ObjectNode payload = JSON.createObjectNode()
                     .put("sequence", sequence)
-                    .put("metric", "phase8")
+                    .put("metric", "phase9")
                     .put("value", 22.5)
                     .put("unit", "C");
             client.publish(
@@ -264,7 +357,7 @@ class Phase8ComposeIntegrationTest {
             client.connect(connectOptions(credentials, true));
             ObjectNode payload = JSON.createObjectNode()
                     .put("sequence", sequence)
-                    .put("metric", "phase8")
+                    .put("metric", "phase9")
                     .put("value", 22.5)
                     .put("unit", "C");
             client.publish(
@@ -463,7 +556,7 @@ class Phase8ComposeIntegrationTest {
             value = System.getenv(fallback);
         }
         if (value == null || value.isBlank()) {
-            throw new IllegalStateException("Set " + primary + " or " + fallback + " for Phase 8 integration checks");
+            throw new IllegalStateException("Set " + primary + " or " + fallback + " for Phase 9 integration checks");
         }
         return value;
     }

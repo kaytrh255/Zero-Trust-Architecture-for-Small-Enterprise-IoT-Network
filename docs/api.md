@@ -45,7 +45,7 @@ Send the token from login in the `Authorization` header. Returns the current use
 
 ## Devices
 
-Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the request cannot assign another owner. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Device code and MQTT client ID must be unique. Both are immutable after provisioning because the broker username/topic ACL and client-ID binding use them.
+Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the create request cannot assign another owner. An administrator can later transfer ownership to an enabled `USER` using the owner endpoint below. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Device code and MQTT client ID must be unique. Both are immutable after provisioning because the broker username/topic ACL and client-ID binding use them.
 
 ### `GET /api/devices` — `ADMIN`, `SECURITY_ANALYST`
 
@@ -88,6 +88,18 @@ Returns HTTP `200 OK`, replaces the broker password, and returns the username/pa
 ### `PUT /api/devices/{id}` — `ADMIN`
 
 Updates the device name, type, and IP address using the same request shape as POST. `deviceCode` and `mqttClientId` must remain unchanged; attempts to change either return HTTP `409 CONFLICT`. Status and owner are not changed by this endpoint.
+
+### `PATCH /api/devices/{id}/owner` — `ADMIN` (Phase 9)
+
+Request:
+
+```json
+{
+  "ownerUsername": "student1"
+}
+```
+
+The account must exist, be enabled, and have role `USER`. Surrounding whitespace is trimmed and the username is normalized to lowercase before lookup. Returns HTTP `200 OK` with the updated `DeviceResponse`, including `ownerId` and `ownerUsername`. A nonexistent username returns `404`; an ADMIN, `SECURITY_ANALYST`, `DEVICE`, or disabled account is rejected with `400`. Non-ADMIN callers receive `403`. Invalid requests never change the owner.
 
 ### `PATCH /api/devices/{id}/status` — `ADMIN`
 
@@ -177,17 +189,20 @@ An evaluated `ALLOW` or `DENY` returns HTTP `200 OK` with decision, reason, poli
 
 Returns up to the most recent 100 evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, optional MQTT `messageSequence`, matching-policy snapshot, and time. Evaluated MQTT replay attempts have reason `REPLAYED_MESSAGE` and include the repeated sequence. Broker authentication/ACL failures and malformed MQTT messages rejected before policy evaluation are in Mosquitto/backend logs, not `access_audits`.
 
-## Protected telemetry resource (Phase 6)
+## Protected telemetry resource (Phases 6 and 9)
 
 ### `GET /api/resources/devices/{deviceCode}/telemetry` — authenticated
 
-This is a protected demo resource route, not just a decision check. The API derives the requester ID/name/role from the JWT and always evaluates the fixed `sensor-data` / `READ` operation against the registered target device. `USER`/`DEVICE` are eligible requester roles; an authenticated management role receives a recorded DENY. It queries telemetry only if the decision is `ALLOW`.
+This is a protected demo resource route, not just a decision check. The API derives requester ID/name/role from the JWT and always evaluates the fixed `sensor-data` / `READ` operation against the registered target device. API requester-role checks remain in force; management roles receive a recorded DENY. In addition to an active device and matching ALLOW policy, the authenticated requester must match the device owner, which ADMINs assign only to enabled `USER` accounts. The route queries telemetry only after all checks allow access.
+
+Decision order is requester role, registered device, `ACTIVE` status, exact policy (`EXPLICIT_DENY` before ALLOW; no match is default DENY), then owner verification for a policy-allowed read. This preserves `DEVICE_NOT_ACTIVE`, explicit DENY, and `NO_MATCHING_POLICY` precedence. The generic `/api/access/check` endpoint remains a policy-decision demonstration and does not authorize or fetch a protected resource.
 
 - `ALLOW`: HTTP `200`, with an `accessDecision` (including audit ID) and up to 100 telemetry samples for that device.
-- `DENY`: HTTP `403`, with the denied `accessDecision` and an empty telemetry array. No telemetry query is run.
+- `DEVICE_NOT_OWNED`: HTTP `403`, with an audited denied `accessDecision` and an empty telemetry array. No telemetry query is run.
+- Other evaluated `DENY`: HTTP `403`, with reason/audit ID and an empty telemetry array. No telemetry query is run.
 - Missing/invalid JWT: HTTP `401`.
 
-For the seeded rules, an active sensor is allowed, the blocked `SENSOR-002` is denied by status, and `CAMERA-001` is denied because it has no `sensor-data` / `READ` policy. The JWT identifies the requester; the path's device code names the target device. There is no per-user device-ownership check.
+A non-owner is denied even when the device is active and the policy matches ALLOW. For the seeded rules, an active sensor is policy-allowed (so ownership is then checked), the blocked `SENSOR-002` is denied as `DEVICE_NOT_ACTIVE`, and `CAMERA-001` is denied as `NO_MATCHING_POLICY` before ownership is considered. The JWT supplies requester identity; the path names the target device. A `DEVICE_NOT_OWNED` audit includes the matched ALLOW policy snapshot, documenting that policy alone was insufficient.
 
 ## MQTT telemetry (Phase 7)
 

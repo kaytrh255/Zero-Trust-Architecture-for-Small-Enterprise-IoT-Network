@@ -105,6 +105,10 @@ public class Device {
         this.status = status;
     }
 
+    public void changeOwner(UserAccount owner) {
+        this.owner = owner;
+    }
+
     public void recordMqttSequence(long sequence) {
         if (sequence <= lastMqttSequence) {
             throw new IllegalArgumentException("MQTT sequence must advance monotonically");

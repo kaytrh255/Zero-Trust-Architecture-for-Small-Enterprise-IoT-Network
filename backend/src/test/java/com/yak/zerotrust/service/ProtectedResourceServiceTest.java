@@ -43,7 +43,7 @@ class ProtectedResourceServiceTest {
     void returnsTelemetryOnlyAfterAnAllowDecision() {
         Device device = device("SENSOR-001", DeviceType.SENSOR);
         AccessDecision decision = decision(AccessDecisionOutcome.ALLOW, AccessDecisionReason.POLICY_ALLOW);
-        when(zeroTrustDecisionService.evaluate(any())).thenReturn(new AccessEvaluation(decision, device));
+        when(zeroTrustDecisionService.evaluateProtectedResource(any())).thenReturn(new AccessEvaluation(decision, device));
         List<TelemetryResponse> samples = List.of(new TelemetryResponse(
                 12L,
                 "SENSOR-001",
@@ -68,7 +68,7 @@ class ProtectedResourceServiceTest {
         assertThat(response.accessDecision()).isEqualTo(decision);
         assertThat(response.telemetry()).isEqualTo(samples);
         ArgumentCaptor<AccessContext> contextCaptor = ArgumentCaptor.forClass(AccessContext.class);
-        verify(zeroTrustDecisionService).evaluate(contextCaptor.capture());
+        verify(zeroTrustDecisionService).evaluateProtectedResource(contextCaptor.capture());
         assertThat(contextCaptor.getValue().requesterUsername()).isEqualTo("student1");
         assertThat(contextCaptor.getValue().requesterRole()).isEqualTo(UserRole.USER);
         assertThat(contextCaptor.getValue().channel()).isEqualTo(AccessChannel.API);
@@ -80,8 +80,8 @@ class ProtectedResourceServiceTest {
 
     @Test
     void returnsNoTelemetryAndNeverQueriesTheResourceWhenDenied() {
-        AccessDecision decision = decision(AccessDecisionOutcome.DENY, AccessDecisionReason.DEVICE_NOT_ACTIVE);
-        when(zeroTrustDecisionService.evaluate(any())).thenReturn(new AccessEvaluation(decision, null));
+        AccessDecision decision = decision(AccessDecisionOutcome.DENY, AccessDecisionReason.DEVICE_NOT_OWNED);
+        when(zeroTrustDecisionService.evaluateProtectedResource(any())).thenReturn(new AccessEvaluation(decision, null));
         ProtectedResourceService service = new ProtectedResourceService(
                 zeroTrustDecisionService,
                 telemetryQueryService
