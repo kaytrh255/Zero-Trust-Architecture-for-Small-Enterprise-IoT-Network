@@ -1,14 +1,18 @@
 package com.yak.zerotrust.controller;
 
+import com.yak.zerotrust.dto.AuditPageResponse;
 import com.yak.zerotrust.dto.DeviceOwnerRequest;
 import com.yak.zerotrust.dto.DeviceOwnershipAuditResponse;
 import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.dto.DeviceResponse;
+import com.yak.zerotrust.dto.DeviceStatusAuditResponse;
 import com.yak.zerotrust.dto.DeviceStatusRequest;
+import com.yak.zerotrust.entity.DeviceStatus;
 import com.yak.zerotrust.security.UserPrincipal;
 import com.yak.zerotrust.service.DeviceService;
 import jakarta.validation.Valid;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -20,9 +24,11 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.time.Instant;
 import java.util.List;
 
 @RestController
@@ -49,8 +55,38 @@ public class DeviceController {
 
     @GetMapping("/{id}/ownership-audits")
     @PreAuthorize("hasAnyRole('ADMIN', 'SECURITY_ANALYST')")
-    public List<DeviceOwnershipAuditResponse> getOwnershipAudits(@PathVariable Long id) {
-        return deviceService.getOwnershipAudits(id);
+    public AuditPageResponse<DeviceOwnershipAuditResponse> getOwnershipAudits(
+            @PathVariable Long id,
+            @RequestParam(name = "page", defaultValue = "0") int page,
+            @RequestParam(name = "size", defaultValue = "100") int size,
+            @RequestParam(name = "from", required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
+            @RequestParam(name = "to", required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
+            @RequestParam(name = "changedByUsername", required = false) String changedByUsername,
+            @RequestParam(name = "newOwnerUsername", required = false) String newOwnerUsername
+    ) {
+        return deviceService.getOwnershipAudits(
+                id, page, size, from, to, changedByUsername, newOwnerUsername
+        );
+    }
+
+    @GetMapping("/{id}/status-audits")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SECURITY_ANALYST')")
+    public AuditPageResponse<DeviceStatusAuditResponse> getStatusAudits(
+            @PathVariable Long id,
+            @RequestParam(name = "page", defaultValue = "0") int page,
+            @RequestParam(name = "size", defaultValue = "100") int size,
+            @RequestParam(name = "from", required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
+            @RequestParam(name = "to", required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
+            @RequestParam(name = "newStatus", required = false) DeviceStatus newStatus,
+            @RequestParam(name = "changedByUsername", required = false) String changedByUsername
+    ) {
+        return deviceService.getStatusAudits(
+                id, page, size, from, to, newStatus, changedByUsername
+        );
     }
 
     @PostMapping
@@ -79,9 +115,15 @@ public class DeviceController {
     @PreAuthorize("hasRole('ADMIN')")
     public DeviceResponse updateStatus(
             @PathVariable Long id,
-            @Valid @RequestBody DeviceStatusRequest request
+            @Valid @RequestBody DeviceStatusRequest request,
+            @AuthenticationPrincipal UserPrincipal principal
     ) {
-        return deviceService.updateStatus(id, request.status());
+        return deviceService.updateStatus(
+                id,
+                request.status(),
+                principal.getId(),
+                principal.getUsername()
+        );
     }
 
     @PatchMapping("/{id}/owner")
@@ -102,7 +144,10 @@ public class DeviceController {
     @DeleteMapping("/{id}")
     @PreAuthorize("hasRole('ADMIN')")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void delete(@PathVariable Long id) {
-        deviceService.revoke(id);
+    public void delete(
+            @PathVariable Long id,
+            @AuthenticationPrincipal UserPrincipal principal
+    ) {
+        deviceService.revoke(id, principal.getId(), principal.getUsername());
     }
 }

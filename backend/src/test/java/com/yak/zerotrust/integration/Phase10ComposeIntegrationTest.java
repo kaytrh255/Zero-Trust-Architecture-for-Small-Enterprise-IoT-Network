@@ -113,6 +113,19 @@ class Phase10ComposeIntegrationTest {
         assertThat(transfer.path("changedByUsername").asText()).isEqualTo(adminUsername);
         assertThat(transfer.path("changedAt").asText()).isNotBlank();
 
+        HttpResult filteredOwnershipHistory = request(
+                "GET",
+                "/api/devices/" + sensor.deviceId()
+                        + "/ownership-audits?newOwnerUsername=" + ownerUsername
+                        + "&changedByUsername=" + adminUsername + "&page=0&size=1",
+                adminToken,
+                null
+        );
+        assertStatus(filteredOwnershipHistory, 200);
+        assertThat(filteredOwnershipHistory.body().path("content").size()).isEqualTo(1);
+        assertThat(filteredOwnershipHistory.body().path("totalElements").asLong()).isEqualTo(1L);
+        assertThat(filteredOwnershipHistory.body().path("hasNext").asBoolean()).isFalse();
+
         HttpResult forbiddenHistory = request(
                 "GET", "/api/devices/" + sensor.deviceId() + "/ownership-audits", ownerToken, null
         );
@@ -256,6 +269,19 @@ class Phase10ComposeIntegrationTest {
             assertThat(row.path("reason").asText()).isEqualTo("DEVICE_NOT_OWNED");
             assertThat(row.path("deviceCode").asText()).isEqualTo(sensorCode);
         });
+
+        HttpResult filteredAccessHistory = request(
+                "GET",
+                "/api/access/audits?decision=DENY&reason=DEVICE_NOT_OWNED&deviceCode="
+                        + sensorCode + "&page=0&size=1",
+                adminToken,
+                null
+        );
+        assertStatus(filteredAccessHistory, 200);
+        assertThat(filteredAccessHistory.body().path("content").size()).isEqualTo(1);
+        assertThat(filteredAccessHistory.body().path("totalElements").asLong()).isEqualTo(1L);
+        assertThat(filteredAccessHistory.body().path("content").get(0).path("reason").asText())
+                .isEqualTo("DEVICE_NOT_OWNED");
 
         HttpResult protectedDefaultDeny = request(
                 "GET", "/api/resources/devices/CAMERA-001/telemetry", ownerToken, null
@@ -495,15 +521,24 @@ class Phase10ComposeIntegrationTest {
     }
 
     private List<JsonNode> ownershipAudits(String adminToken, long deviceId) throws Exception {
-        return array(request("GET", "/api/devices/" + deviceId + "/ownership-audits", adminToken, null), 200);
+        return pageContent(request("GET", "/api/devices/" + deviceId + "/ownership-audits", adminToken, null), 200);
     }
 
     private List<JsonNode> audits(String adminToken) throws Exception {
-        return array(request("GET", "/api/access/audits", adminToken, null), 200);
+        return pageContent(request("GET", "/api/access/audits", adminToken, null), 200);
     }
 
     private List<JsonNode> telemetry(String adminToken) throws Exception {
         return array(request("GET", "/api/telemetry", adminToken, null), 200);
+    }
+
+    private List<JsonNode> pageContent(HttpResult result, int expectedStatus) {
+        assertStatus(result, expectedStatus);
+        JsonNode content = result.body().path("content");
+        assertThat(content.isArray()).as("paged history response content").isTrue();
+        List<JsonNode> values = new ArrayList<>();
+        content.forEach(values::add);
+        return values;
     }
 
     private List<JsonNode> array(HttpResult result, int expectedStatus) {

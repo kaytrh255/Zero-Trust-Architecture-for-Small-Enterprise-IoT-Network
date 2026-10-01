@@ -19,7 +19,8 @@ Spring Boot application <====== verified TLS ======> Mosquitto :8883
   ├── PolicyController / PolicyService
   ├── AccessController / ZeroTrustDecisionService
   ├── ProtectedResourceController / ProtectedResourceService
-  ├── AccessAuditService / DeviceOwnershipAuditService / TelemetryIngestionService
+  ├── AccessAuditService / DeviceOwnershipAuditService / DeviceStatusAuditService
+  ├── PolicyChangeAuditService / TelemetryIngestionService
   ├── repositories / Flyway migrations
   └── TelemetryQueryService
       |
@@ -65,7 +66,13 @@ The API returns a policy decision for `/api/access/check`; it is not a reverse p
 
 ## Device ownership transfer audit
 
-`PATCH /api/devices/{id}/owner` resolves the requested enabled USER and compares persisted owner IDs. A real change updates `devices.owner_id` and inserts an immutable `device_ownership_audits` snapshot in the same transaction; a failed transfer or same-owner no-op does not create an event. The snapshot records device code, previous/new owner IDs and usernames, authenticated ADMIN ID/username, and timestamp. `GET /api/devices/{id}/ownership-audits` returns up to 100 newest transfer events to ADMIN and SECURITY_ANALYST roles. This management history is separate from `access_audits`, which records access decisions.
+`PATCH /api/devices/{id}/owner` resolves the requested enabled USER and compares persisted owner IDs. A real change updates `devices.owner_id` and inserts an immutable `device_ownership_audits` snapshot in the same transaction; a failed transfer or same-owner no-op does not create an event. The snapshot records device code, previous/new owner IDs and usernames, authenticated ADMIN ID/username, and timestamp. `GET /api/devices/{id}/ownership-audits` returns paged transfer events to ADMIN and SECURITY_ANALYST roles (default and maximum page size 100). This management history is separate from `access_audits`, which records access decisions.
+
+## Device-status and policy-change audit
+
+The status endpoint and device revocation flow capture the current and requested `DeviceStatus`. When the value changes, `DeviceService` changes the entity and calls `DeviceStatusAuditService` in the same transaction. Its typed `device_status_audits` event snapshots the device ID/code, previous/new statuses, authenticated ADMIN ID/username, and time. A status no-op writes no event; an invalid or failed request rolls back without one. Broker/device-status enforcement and its separate `access_audits` decisions remain unchanged.
+
+`PolicyService` records typed CREATE, UPDATE, and DELETE events via `PolicyChangeAuditService`. CREATE captures the after snapshot, UPDATE both before and after, and DELETE the last before snapshot. Mutations and audit insertion share one transaction; a no-op update and failed conflict/validation path do not add a successful-change event. The policy history table deliberately has no foreign key to `policies`, so `GET /api/policies/{id}/audits` can still return the DELETE history after the live row is removed. All four audit-history APIs are available only to ADMIN and SECURITY_ANALYST. They use stable newest-first pagination (page size 1–100), inclusive time-range filters, and relevant exact-match event filters. These histories remain independent of each other: access decisions, ownership transfers, device-status transitions, and policy mutations each retain their own audit records.
 
 ## MQTT identity, TLS, and telemetry path
 
@@ -93,4 +100,4 @@ Mosquitto authenticates the MQTT username and assigns that device a role with a 
 
 ## Persistence
 
-Flyway migrations `V1__create_users.sql` through `V8__audit_device_ownership_transfers.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed access-audit reasons; V8 creates the separate append-only ownership-transfer history table. Device ownership itself remains in `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.
+Flyway migrations `V1__create_users.sql` through `V10__make_audit_history_append_only.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed access-audit reasons; V8 creates the separate ownership-transfer history table; V9 adds separate status-transition and policy-change history tables with actor references and history indexes; V10 installs database triggers that reject UPDATE and DELETE statements on all four audit-history tables. Device ownership itself remains in `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.

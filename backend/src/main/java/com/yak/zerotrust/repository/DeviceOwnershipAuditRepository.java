@@ -2,10 +2,7 @@ package com.yak.zerotrust.repository;
 
 import com.yak.zerotrust.entity.DeviceOwnershipAudit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 
-import java.util.List;
-
-public interface DeviceOwnershipAuditRepository extends JpaRepository<DeviceOwnershipAudit, Long> {
-
-    List<DeviceOwnershipAudit> findTop100ByDeviceIdOrderByChangedAtDescIdDesc(Long deviceId);
+public interface DeviceOwnershipAuditRepository extends JpaRepository<DeviceOwnershipAudit, Long>, JpaSpecificationExecutor<DeviceOwnershipAudit> {
 }

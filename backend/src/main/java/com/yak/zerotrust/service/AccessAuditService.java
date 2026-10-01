@@ -1,14 +1,21 @@
 package com.yak.zerotrust.service;
 
+import com.yak.zerotrust.access.AccessChannel;
 import com.yak.zerotrust.access.AccessContext;
 import com.yak.zerotrust.access.AccessDecision;
+import com.yak.zerotrust.access.AccessDecisionOutcome;
+import com.yak.zerotrust.access.AccessDecisionReason;
 import com.yak.zerotrust.dto.AccessAuditResponse;
+import com.yak.zerotrust.dto.AuditPageResponse;
 import com.yak.zerotrust.entity.AccessAudit;
+import com.yak.zerotrust.entity.PolicyAction;
 import com.yak.zerotrust.repository.AccessAuditRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
+import java.time.Instant;
 
 @Service
 public class AccessAuditService {
@@ -25,10 +32,34 @@ public class AccessAuditService {
     }
 
     @Transactional(readOnly = true)
-    public List<AccessAuditResponse> getRecent() {
-        return accessAuditRepository.findTop100ByOrderByEvaluatedAtDesc().stream()
-                .map(this::toResponse)
-                .toList();
+    public AuditPageResponse<AccessAuditResponse> search(
+            int page,
+            int size,
+            Instant from,
+            Instant to,
+            AccessDecisionOutcome decision,
+            AccessDecisionReason reason,
+            AccessChannel channel,
+            String deviceCode,
+            String requesterUsername,
+            String resource,
+            PolicyAction action
+    ) {
+        Specification<AccessAudit> specification = AuditQuerySupport.<AccessAudit>timestampRange(
+                        "evaluatedAt", from, to
+                )
+                .and(AuditQuerySupport.<AccessAudit>equal("decision", decision))
+                .and(AuditQuerySupport.<AccessAudit>equal("reason", reason))
+                .and(AuditQuerySupport.<AccessAudit>equal("channel", channel))
+                .and(AuditQuerySupport.<AccessAudit>equal("action", action))
+                .and(AuditQuerySupport.<AccessAudit>equalIgnoreCase("deviceCode", deviceCode))
+                .and(AuditQuerySupport.<AccessAudit>equalIgnoreCase("requesterUsername", requesterUsername))
+                .and(AuditQuerySupport.<AccessAudit>equalIgnoreCase("resource", resource));
+        Page<AccessAudit> audits = accessAuditRepository.findAll(
+                specification,
+                AuditQuerySupport.pageable(page, size, from, to, "evaluatedAt")
+        );
+        return AuditPageResponse.from(audits.map(this::toResponse));
     }
 
     private AccessAuditResponse toResponse(AccessAudit audit) {

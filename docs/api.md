@@ -43,6 +43,24 @@ Successful response: HTTP `200 OK` with `accessToken`, `tokenType` (`Bearer`), `
 
 Send the token from login in the `Authorization` header. Returns the current user's safe profile. Missing, malformed, invalid, or expired tokens return `401 Unauthorized`.
 
+## Audit history pagination and filters (Phase 12)
+
+All history endpoints return a stable page envelope instead of a bare array. The default is `page=0&size=100`; pages are zero-based, `size` must be 1–100, and records are ordered newest first with ID as the tie-breaker. `from` and `to` accept ISO-8601 instants (for example, `2026-10-01T00:00:00Z`) and are inclusive. Filters use full-string equality; username, device-code, and resource filters ignore case and surrounding whitespace. Invalid page/size, malformed filter values, or `from` later than `to` returns HTTP `400`.
+
+```json
+{
+  "content": [{ "id": 41, "changedAt": "2026-10-01T12:00:00Z" }],
+  "page": 0,
+  "size": 100,
+  "totalElements": 145,
+  "totalPages": 2,
+  "hasNext": true,
+  "hasPrevious": false
+}
+```
+
+`GET /api/access/audits`, `GET /api/devices/{id}/ownership-audits`, `GET /api/devices/{id}/status-audits`, and `GET /api/policies/{id}/audits` use this envelope. Their access remains restricted to `ADMIN` and `SECURITY_ANALYST`. Flyway V10 makes persisted audit rows append-only by rejecting database UPDATE/DELETE operations.
+
 ## Devices
 
 Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the create request cannot assign another owner. An administrator can later transfer ownership to an enabled `USER` using the owner endpoint below. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Device code and MQTT client ID must be unique. Both are immutable after provisioning because the broker username/topic ACL and client-ID binding use them.
@@ -103,23 +121,31 @@ The account must exist, be enabled, and have role `USER`. Surrounding whitespace
 
 ### `GET /api/devices/{id}/ownership-audits` — `ADMIN`, `SECURITY_ANALYST` (Phase 10)
 
-Returns up to the 100 most recent successful ownership transfers for the device, newest first. Each immutable event includes device ID/code, previous and new owner IDs/usernames as snapshots, the acting ADMIN's ID/username, and `changedAt`:
+Returns the page of successful ownership transfers for the device, newest first. Supports optional `from`, `to`, `page`, `size`, `changedByUsername`, and `newOwnerUsername` parameters. Each immutable event includes device ID/code, previous and new owner IDs/usernames as snapshots, the acting ADMIN's ID/username, and `changedAt`. The body uses the common page envelope:
 
 ```json
-[
-  {
-    "id": 12,
-    "deviceId": 3,
-    "deviceCode": "SENSOR-001",
-    "previousOwnerId": 1,
-    "previousOwnerUsername": "admin",
-    "newOwnerId": 9,
-    "newOwnerUsername": "student1",
-    "changedByUserId": 1,
-    "changedByUsername": "admin",
-    "changedAt": "2026-10-01T12:00:00Z"
-  }
-]
+{
+  "content": [
+    {
+      "id": 12,
+      "deviceId": 3,
+      "deviceCode": "SENSOR-001",
+      "previousOwnerId": 1,
+      "previousOwnerUsername": "admin",
+      "newOwnerId": 9,
+      "newOwnerUsername": "student1",
+      "changedByUserId": 1,
+      "changedByUsername": "admin",
+      "changedAt": "2026-10-01T12:00:00Z"
+    }
+  ],
+  "page": 0,
+  "size": 100,
+  "totalElements": 1,
+  "totalPages": 1,
+  "hasNext": false,
+  "hasPrevious": false
+}
 ```
 
 Device creation's initial owner assignment is not a transfer event; reassigning the same owner and failed requests also create no event. An unknown device returns `404`; other roles receive `403`. The events are stored in `device_ownership_audits`, separately from access-decision records.
@@ -134,11 +160,15 @@ Request:
 }
 ```
 
-Allowed statuses: `ACTIVE`, `INACTIVE`, `BLOCKED`, `REVOKED`. Status is enforced in the backend on every delivered telemetry message. Broker accounts remain enabled so status failures create `DEVICE_NOT_ACTIVE` audit rows; those messages are not persisted and do not advance the replay high-water mark.
+Allowed statuses: `ACTIVE`, `INACTIVE`, `BLOCKED`, `REVOKED`. Status is enforced in the backend on every delivered telemetry message. Broker accounts remain enabled so status failures create `DEVICE_NOT_ACTIVE` access-audit rows; those messages are not persisted and do not advance the replay high-water mark. A successful actual transition also inserts a `device_status_audits` event in the same database transaction, with device ID/code, previous/new status, authenticated administrator ID/username, and timestamp. Repeating the current status returns HTTP `200` but creates no event; a failed request creates no event.
+
+### `GET /api/devices/{id}/status-audits` — `ADMIN`, `SECURITY_ANALYST` (Phase 11)
+
+Returns a page of successful status transitions, newest first. Supports optional `from`, `to`, `page`, `size`, `newStatus`, and `changedByUsername` parameters. Each record has `id`, `deviceId`, `deviceCode`, `previousStatus`, `newStatus`, `changedByUserId`, `changedByUsername`, and `changedAt`. A missing device returns `404`; other roles receive `403`. This management history is stored separately from MQTT/API access-decision audits and ownership-transfer audits.
 
 ### `DELETE /api/devices/{id}` — `ADMIN`
 
-Returns HTTP `204 No Content` and sets the device to `REVOKED`; the row and broker credential remain, but backend status validation denies and audits any valid scoped telemetry without storing it. The device is retained rather than physically removed.
+Returns HTTP `204 No Content` and sets the device to `REVOKED`; the row and broker credential remain, but backend status validation denies and audits any valid scoped telemetry without storing it. If this changes the status, it also writes one status-history event atomically. Revoking an already-REVOKED device is a no-op for history. The device is retained rather than physically removed.
 
 ## Policies
 
@@ -151,6 +181,33 @@ Returns all policies sorted by name.
 ### `GET /api/policies/{id}` — `ADMIN`, `SECURITY_ANALYST`
 
 Returns a single policy or `404`.
+
+### `GET /api/policies/{id}/audits` — `ADMIN`, `SECURITY_ANALYST` (Phase 11)
+
+Returns a page of CREATE/UPDATE/DELETE events for the policy ID. Supports optional `from`, `to`, `page`, `size`, `operation`, and `changedByUsername` parameters. This endpoint intentionally does not require the live policy to exist, so DELETE history remains readable after removal; an ID with no history has empty `content` and zero total elements. Each event includes operation, before/after policy snapshots, acting user ID/username, and `changedAt`. CREATE has only `after`, UPDATE has both snapshots, and DELETE has only `before`. Other roles receive `403`.
+
+```json
+{
+  "content": [
+    {
+      "id": 41,
+      "policyId": 12,
+      "operation": "UPDATE",
+      "before": { "name": "Sensor Read", "subject": "SENSOR", "resource": "sensor-data", "action": "READ", "effect": "ALLOW", "enabled": true, "description": "old rule" },
+      "after": { "name": "Sensor Read", "subject": "SENSOR", "resource": "sensor-data", "action": "READ", "effect": "DENY", "enabled": false, "description": "changed rule" },
+      "changedByUserId": 1,
+      "changedByUsername": "admin",
+      "changedAt": "2026-10-01T12:00:00Z"
+    }
+  ],
+  "page": 0,
+  "size": 100,
+  "totalElements": 1,
+  "totalPages": 1,
+  "hasNext": false,
+  "hasPrevious": false
+}
+```
 
 ### `POST /api/policies` — `ADMIN`
 
@@ -168,15 +225,15 @@ Request:
 }
 ```
 
-Returns HTTP `201 Created`. Policy names are unique. Supported actions: `READ`, `WRITE`, `EXECUTE`; effects: `ALLOW`, `DENY`.
+Returns HTTP `201 Created`. Policy names are unique. Supported actions: `READ`, `WRITE`, `EXECUTE`; effects: `ALLOW`, `DENY`. A successful CREATE and its `policy_change_audits` after-snapshot are committed atomically with the authenticated ADMIN actor and timestamp. Duplicate/invalid requests do not create an event.
 
 ### `PUT /api/policies/{id}` — `ADMIN`
 
-Replaces the policy fields using the same request body as POST.
+Replaces the policy fields using the same request body as POST. An actual update and its before/after snapshots are one transaction. A semantically unchanged update returns HTTP `200` but does not add an event; validation, missing-policy, and duplicate-name failures do not add events.
 
 ### `DELETE /api/policies/{id}` — `ADMIN`
 
-Physically removes the policy and returns HTTP `204 No Content`.
+Physically removes the policy and returns HTTP `204 No Content`. The DELETE event with the last policy snapshot is committed atomically with removal. Audit rows do not have a foreign key to the live policy, preserving history after deletion.
 
 ## Access decisions (Phase 5)
 
@@ -210,7 +267,7 @@ An evaluated `ALLOW` or `DENY` returns HTTP `200 OK` with decision, reason, poli
 
 ### `GET /api/access/audits` — `ADMIN`, `SECURITY_ANALYST`
 
-Returns up to the most recent 100 evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, optional MQTT `messageSequence`, matching-policy snapshot, and time. Evaluated MQTT replay attempts have reason `REPLAYED_MESSAGE` and include the repeated sequence. Broker authentication/ACL failures and malformed MQTT messages rejected before policy evaluation are in Mosquitto/backend logs, not `access_audits`.
+Returns a page of evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, optional MQTT `messageSequence`, matching-policy snapshot, and time. Supports optional `from`, `to`, `page`, `size`, `decision`, `reason`, `channel`, `action`, `deviceCode`, `requesterUsername`, and `resource` filters. Evaluated MQTT replay attempts have reason `REPLAYED_MESSAGE` and include the repeated sequence. Broker authentication/ACL failures and malformed MQTT messages rejected before policy evaluation are in Mosquitto/backend logs, not `access_audits`.
 
 ## Protected telemetry resource (Phases 6 and 9)
 
@@ -267,4 +324,4 @@ Validation, authentication, authorization, and application errors use a consiste
 
 Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role or a DENY at the protected telemetry route, `404` missing resource, `409` duplicate/immutable identity, and `500` unexpected server error. A DENY from `POST /api/access/check` is an HTTP `200` decision body. A protected resource DENY is HTTP `403` with a `ProtectedTelemetryResponse` containing the access decision and an empty telemetry array, not an `ApiError` body.
 
-API authentication and policy-change audits, dashboard endpoints, application-level MQTT message signatures, and transparent enforcement on arbitrary IoT resources are not implemented.
+API authentication-attempt audits, dashboard endpoints, application-level MQTT message signatures, and transparent enforcement on arbitrary IoT resources are not implemented. Phase 11 provides separate audit history for successful device-status transitions and policy mutations.

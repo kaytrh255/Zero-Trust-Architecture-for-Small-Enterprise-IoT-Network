@@ -1,9 +1,11 @@
 package com.yak.zerotrust.service;
 
+import com.yak.zerotrust.dto.AuditPageResponse;
 import com.yak.zerotrust.dto.DeviceOwnershipAuditResponse;
 import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.dto.DeviceResponse;
+import com.yak.zerotrust.dto.DeviceStatusAuditResponse;
 import com.yak.zerotrust.entity.Device;
 import com.yak.zerotrust.entity.DeviceStatus;
 import com.yak.zerotrust.entity.UserAccount;
@@ -18,6 +20,7 @@ import com.yak.zerotrust.repository.UserRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -30,19 +33,22 @@ public class DeviceService {
     private final DeviceCredentialService deviceCredentialService;
     private final MqttDynamicSecurityService mqttDynamicSecurityService;
     private final DeviceOwnershipAuditService deviceOwnershipAuditService;
+    private final DeviceStatusAuditService deviceStatusAuditService;
 
     public DeviceService(
             DeviceRepository deviceRepository,
             UserRepository userRepository,
             DeviceCredentialService deviceCredentialService,
             MqttDynamicSecurityService mqttDynamicSecurityService,
-            DeviceOwnershipAuditService deviceOwnershipAuditService
+            DeviceOwnershipAuditService deviceOwnershipAuditService,
+            DeviceStatusAuditService deviceStatusAuditService
     ) {
         this.deviceRepository = deviceRepository;
         this.userRepository = userRepository;
         this.deviceCredentialService = deviceCredentialService;
         this.mqttDynamicSecurityService = mqttDynamicSecurityService;
         this.deviceOwnershipAuditService = deviceOwnershipAuditService;
+        this.deviceStatusAuditService = deviceStatusAuditService;
     }
 
     @Transactional(readOnly = true)
@@ -58,9 +64,35 @@ public class DeviceService {
     }
 
     @Transactional(readOnly = true)
-    public List<DeviceOwnershipAuditResponse> getOwnershipAudits(Long id) {
+    public AuditPageResponse<DeviceOwnershipAuditResponse> getOwnershipAudits(
+            Long id,
+            int page,
+            int size,
+            Instant from,
+            Instant to,
+            String changedByUsername,
+            String newOwnerUsername
+    ) {
         findDevice(id);
-        return deviceOwnershipAuditService.getRecentForDevice(id);
+        return deviceOwnershipAuditService.searchForDevice(
+                id, page, size, from, to, changedByUsername, newOwnerUsername
+        );
+    }
+
+    @Transactional(readOnly = true)
+    public AuditPageResponse<DeviceStatusAuditResponse> getStatusAudits(
+            Long id,
+            int page,
+            int size,
+            Instant from,
+            Instant to,
+            DeviceStatus newStatus,
+            String changedByUsername
+    ) {
+        findDevice(id);
+        return deviceStatusAuditService.searchForDevice(
+                id, page, size, from, to, newStatus, changedByUsername
+        );
     }
 
     @Transactional
@@ -120,10 +152,13 @@ public class DeviceService {
     }
 
     @Transactional
-    public DeviceResponse updateStatus(Long id, DeviceStatus status) {
-        Device device = findDevice(id);
-        device.changeStatus(status);
-        return toResponse(device);
+    public DeviceResponse updateStatus(
+            Long id,
+            DeviceStatus status,
+            Long changedByUserId,
+            String changedByUsername
+    ) {
+        return toResponse(changeStatus(id, status, changedByUserId, changedByUsername));
     }
 
     @Transactional
@@ -158,9 +193,29 @@ public class DeviceService {
     }
 
     @Transactional
-    public void revoke(Long id) {
+    public void revoke(Long id, Long changedByUserId, String changedByUsername) {
+        changeStatus(id, DeviceStatus.REVOKED, changedByUserId, changedByUsername);
+    }
+
+    private Device changeStatus(
+            Long id,
+            DeviceStatus newStatus,
+            Long changedByUserId,
+            String changedByUsername
+    ) {
         Device device = findDevice(id);
-        device.changeStatus(DeviceStatus.REVOKED);
+        DeviceStatus previousStatus = device.getStatus();
+        if (previousStatus != newStatus) {
+            device.changeStatus(newStatus);
+            deviceStatusAuditService.recordChange(
+                    device,
+                    previousStatus,
+                    newStatus,
+                    changedByUserId,
+                    changedByUsername
+            );
+        }
+        return device;
     }
 
     private Device findDevice(Long id) {

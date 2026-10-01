@@ -48,6 +48,9 @@ class DeviceServiceTest {
     @Mock
     private DeviceOwnershipAuditService deviceOwnershipAuditService;
 
+    @Mock
+    private DeviceStatusAuditService deviceStatusAuditService;
+
     @Test
     void createsABrokerClientAndReturnsItsCredentialsOnce() {
         UserAccount owner = new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true);
@@ -115,7 +118,7 @@ class DeviceServiceTest {
     }
 
     @Test
-    void keepsBrokerIdentityAvailableForBackendStatusAuditing() {
+    void recordsStatusChangesWithoutChangingBrokerIdentity() {
         Device device = new Device(
                 "SENSOR-003",
                 "Temperature Sensor 3",
@@ -126,8 +129,57 @@ class DeviceServiceTest {
         );
         when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
 
-        assertThat(service().updateStatus(3L, DeviceStatus.BLOCKED).status()).isEqualTo(DeviceStatus.BLOCKED);
+        assertThat(service().updateStatus(3L, DeviceStatus.BLOCKED, 7L, "admin").status())
+                .isEqualTo(DeviceStatus.BLOCKED);
+        verify(deviceStatusAuditService).recordChange(
+                device,
+                DeviceStatus.ACTIVE,
+                DeviceStatus.BLOCKED,
+                7L,
+                "admin"
+        );
         verify(mqttDynamicSecurityService, never()).provisionDevice(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void doesNotRecordAnAuditWhenDeviceStatusIsUnchanged() {
+        Device device = new Device(
+                "SENSOR-003",
+                "Temperature Sensor 3",
+                DeviceType.SENSOR,
+                "192.168.10.24",
+                "SENSOR-003",
+                new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true)
+        );
+        when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
+
+        service().updateStatus(3L, DeviceStatus.ACTIVE, 7L, "admin");
+
+        verify(deviceStatusAuditService, never()).recordChange(any(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    void recordsRevocationAsADeviceStatusChange() {
+        Device device = new Device(
+                "SENSOR-003",
+                "Temperature Sensor 3",
+                DeviceType.SENSOR,
+                "192.168.10.24",
+                "SENSOR-003",
+                new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true)
+        );
+        when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
+
+        service().revoke(3L, 7L, "admin");
+
+        assertThat(device.getStatus()).isEqualTo(DeviceStatus.REVOKED);
+        verify(deviceStatusAuditService).recordChange(
+                device,
+                DeviceStatus.ACTIVE,
+                DeviceStatus.REVOKED,
+                7L,
+                "admin"
+        );
     }
 
     @Test
@@ -239,7 +291,8 @@ class DeviceServiceTest {
                 userRepository,
                 deviceCredentialService,
                 mqttDynamicSecurityService,
-                deviceOwnershipAuditService
+                deviceOwnershipAuditService,
+                deviceStatusAuditService
         );
     }
 

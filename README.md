@@ -15,6 +15,9 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 8:** opt-in Java integration coverage for the Compose stack's TLS, broker credentials/ACLs, status and policy denials, default DENY, replay, audit persistence, and protected-resource route; Phase 9 extends it with ownership checks.
 - **Phase 9:** protected telemetry reads require the authenticated USER to own the device as well as pass device-status and policy checks. ADMINs can transfer a device to an enabled USER; non-owner denials are audited and never query telemetry.
 - **Phase 10:** successful ADMIN ownership transfers are recorded with old/new owner snapshots, actor identity, device, and timestamp; authorized device managers can read each device's transfer history.
+- **Phase 11:** actual device-status transitions and policy CREATE/UPDATE/DELETE operations write typed management-audit records with authenticated actor, timestamp, and before/after snapshots in the same transaction; admins/security analysts can read the latest history, including policy history after deletion.
+- **Phase 12:** all audit-history APIs support a consistent page envelope, stable newest-first ordering, inclusive timestamp ranges, and event-specific filters; page size is capped at 100 and existing role protections remain in force.
+- **Phase 13:** Flyway makes all four audit histories append-only; opt-in Compose checks inject database failures to verify mutation/audit rollback and exercise timestamp-tie pagination.
 
 The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
 
@@ -49,7 +52,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Compose runs PostgreSQL, an initialization step for local TLS/Dynamic Security, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. The `mqtt-init` and `mqtt-bootstrap` containers should finish with exit code `0`; they are one-shot setup services. Flyway creates/updates users, devices, policies, audits, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
+Compose runs PostgreSQL, an initialization step for local TLS/Dynamic Security, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. The `mqtt-init` and `mqtt-bootstrap` containers should finish with exit code `0`; they are one-shot setup services. Flyway creates/updates users, devices, policies, access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 prevents UPDATE/DELETE of rows in all four audit-history tables. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
 
 Check the backend and database:
 
@@ -202,9 +205,9 @@ curl -i http://localhost:8080/api/access/audits \
 
 Accepted telemetry includes `deviceSequence`. Evaluated policy/status/replay decisions appear in `access_audits`. Invalid TLS, username/password, client ID, or device-topic ACL attempts are rejected by Mosquitto before backend ingestion; check `docker compose logs mosquitto`, and do not expect an `access_audits` row for a message the backend never received. Malformed payloads are logged and discarded before decision evaluation.
 
-## Phase 7, 9, and 10 tester checklist
+## Phase 7, 9, 10, 11, and 12 tester checklist
 
-Use an `ADMIN` token for device credential provisioning, status/policy changes, and audit reads; use a `USER` token for the protected-resource checks.
+Use an `ADMIN` token for device credential provisioning, status/policy changes, and audit reads; use a `USER` token for protected-resource checks and to verify management-history access is forbidden. Both `ADMIN` and `SECURITY_ANALYST` may read the history endpoints.
 
 | Tester action | Exact expected result |
 |---|---|
@@ -217,7 +220,12 @@ Use an `ADMIN` token for device credential provisioning, status/policy changes, 
 | Keep the device active but add an enabled `DENY` policy for its `device-telemetry` / `WRITE` action, then publish a new sequence. | Broker ACL allows the device's own topic, but the backend stores no sample and adds `DENY` / `EXPLICIT_DENY`. The sequence high-water mark does not advance. |
 | Disable/remove all matching telemetry policies and publish a new sequence. | Broker ACL allows the publish, but backend returns `DENY` / `NO_MATCHING_POLICY`; no telemetry row is written (default DENY). |
 | ADMIN assigns an enabled `USER` to `SENSOR-001` with `PATCH /api/devices/{id}/owner`; that owner reads the protected route while the device is ACTIVE and policy allows. | Owner change returns HTTP `200` with updated `ownerUsername`; read returns HTTP `200` and the device's telemetry. A transfer audit records old/new owner, acting ADMIN, device, and timestamp. |
-| Repeat the same owner assignment or try to read `/api/devices/{id}/ownership-audits` with a USER token. | Repeating the assignment returns HTTP `200` and creates no duplicate event; USER history access returns HTTP `403`. ADMIN (and SECURITY_ANALYST) history access returns up to 100 newest transfers. |
+| Repeat the same owner assignment or try to read `/api/devices/{id}/ownership-audits` with a USER token. | Repeating the assignment returns HTTP `200` and creates no duplicate event; USER history access returns HTTP `403`. ADMIN (and SECURITY_ANALYST) can page through transfers, up to 100 per page. |
+| Set a device status from `ACTIVE` to `BLOCKED`, then read `GET /api/devices/{id}/status-audits`. | HTTP `200`; one row records `ACTIVE` → `BLOCKED`, the authenticated admin ID/username, and `changedAt`. The device remains blocked, and any access/telemetry check still denies as `DEVICE_NOT_ACTIVE`. |
+| Repeat the same `BLOCKED` update, send an invalid status such as `OFFLINE`, then use `DELETE /api/devices/{id}` to revoke it. | Same-status PATCH is HTTP `200` and adds no event; invalid status is HTTP `400` and adds no event; DELETE is HTTP `204` and adds exactly one `BLOCKED` → `REVOKED` event. Repeating DELETE is a no-op. USER history access is HTTP `403`. |
+| Create a policy, change its effect or enabled state, and read `GET /api/policies/{id}/audits`. | `CREATE` includes only the after snapshot; `UPDATE` includes before and after snapshots. Each records actor and timestamp. A semantically unchanged update succeeds but creates no event. |
+| Try a duplicate policy name or an update that conflicts with another name; then delete a policy and read its history by ID. | Failed mutations return HTTP `409` and add no event. Successful DELETE is HTTP `204` and adds a `DELETE` event with before snapshot; history remains readable after the policy row is gone. USER receives HTTP `403`; ADMIN and SECURITY_ANALYST can read the history. |
+| Read a history with `?page=0&size=1`, then add a filter such as `newStatus=BLOCKED`, `operation=UPDATE`, or `decision=DENY&reason=DEVICE_NOT_OWNED`; use `from`/`to` timestamps to narrow it further. | HTTP `200` returns `content`, zero-based page/size, `totalElements`, `totalPages`, and next/previous flags. Results are newest first; filters narrow the count and rows. `size=101`, negative page, malformed enum, or `from` later than `to` returns HTTP `400`. USER still receives `403`. |
 | Another USER reads the same active, policy-allowed device. | HTTP `403`, reason `DEVICE_NOT_OWNED`, audit ID present, telemetry array empty; the telemetry query is not run. |
 | The owner reads `SENSOR-002` or `CAMERA-001` with the seeded policy set. | HTTP `403`, respectively `DEVICE_NOT_ACTIVE` or `NO_MATCHING_POLICY`, audit ID present, telemetry array empty. Those checks take precedence over ownership. |
 | A non-ADMIN tries to change device ownership, or ADMIN names a non-USER/disabled account. | HTTP `403` for the non-ADMIN request; HTTP `400` for an invalid owner account. Existing owner remains unchanged. |
@@ -233,6 +241,12 @@ docker compose exec postgres psql -U postgres -d zerotrust -c \
 
 docker compose exec postgres psql -U postgres -d zerotrust -c \
   "SELECT device_code, previous_owner_username, new_owner_username, changed_by_username, changed_at FROM device_ownership_audits ORDER BY changed_at DESC LIMIT 20;"
+
+docker compose exec postgres psql -U postgres -d zerotrust -c \
+  "SELECT device_code, previous_status, new_status, changed_by_username, changed_at FROM device_status_audits ORDER BY changed_at DESC LIMIT 20;"
+
+docker compose exec postgres psql -U postgres -d zerotrust -c \
+  "SELECT policy_id, operation, before_name, after_name, changed_by_username, changed_at FROM policy_change_audits ORDER BY changed_at DESC LIMIT 20;"
 ```
 
 Every DENY case must leave telemetry unchanged. Broker authentication/topic-ACL failures are distinct from backend policy/status/replay denials: only the latter are database-audited. Existing telemetry was assigned a starting sequence during V6; query `last_mqtt_sequence` before choosing a first message after upgrading.
@@ -258,7 +272,64 @@ export PHASE10_MQTT_CA_FILE="$PWD/mosquitto/tls/ca.crt"
 
 The test checks: (1) admin and two USER JWT flows plus health, (2) one-time per-device credentials and rotation invalidating the old password, (3) trusted TLS, client-ID, and cross-device topic ACL behavior, (4) ALLOW, replay, status, explicit DENY, and default-DENY MQTT outcomes with audits and persistence checks, (5) ADMIN-only owner transfer and its persisted old/new owner, actor, and timestamp history (including idempotent repeat behavior), and (6) owner ALLOW, non-owner `DEVICE_NOT_OWNED`, explicit policy DENY, blocked-device DENY, and no-match default DENY on the protected resource. All denied resource reads return an audit ID and empty telemetry. Test-created records use `phase10-` / `PHASE10-` prefixes.
 
-Use Java 21 and Maven 3.9+ on the host. To run unit tests without Compose, use `cd backend && mvn test`; the integration test remains disabled unless `PHASE10_INTEGRATION=true`. `.github/workflows/ci.yml` runs the unit suite, starts Compose with per-job local credentials, waits for backend health, runs this integration test, adds Maven test reports to the job summary, collects container logs on failure, and removes the ephemeral Compose volumes. The workflow uses no GitHub secrets. Its results are reported on pull requests and pushes to `main` or this development branch.
+Use Java 21 and Maven 3.9+ on the host. To run unit tests without Compose, use `cd backend && mvn test`; the integration test remains disabled unless `PHASE10_INTEGRATION=true`. `.github/workflows/ci.yml` runs the unit suite, starts Compose with per-job local credentials, waits for backend health, runs the Phase 10 MQTT/ownership test and the Phase 11 and 13 audit tests, adds Maven test reports to the job summary, collects container logs on failure, and removes the ephemeral Compose volumes. The workflow uses no GitHub secrets. Its results are reported on pull requests and pushes to `main` or this development branch.
+
+## Phase 11: test device-status and policy-change history
+
+Phase 11's opt-in Compose integration test exercises the new audit tables and history APIs against a running local stack. It creates one test USER, a test device, and two unique policies; it revokes the test device, deletes the policies after checking the history behavior, and leaves the test user's/device's audit records in the local database. Use a disposable/demo stack, not production data.
+
+```bash
+set -a
+. ./.env
+set +a
+export PHASE11_INTEGRATION=true
+export PHASE11_ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+export PHASE11_ADMIN_PASSWORD="$ADMIN_PASSWORD"
+export PHASE11_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
+(cd backend && mvn -Dtest=Phase11ComposeIntegrationTest test)
+```
+
+Expected outcomes: a real `ACTIVE` → `BLOCKED` transition produces one `device_status_audits` row with the admin actor; repeating `BLOCKED` creates none; invalid `OFFLINE` returns `400` and creates none; revocation creates exactly one `BLOCKED` → `REVOKED` row. A policy CREATE records the after snapshot; an actual UPDATE records both snapshots; a no-op update, duplicate create, and conflicting update do not add rows; DELETE records the before snapshot and its history remains readable after the policy is deleted. ADMIN can read history, while the test USER receives `403`. The test fails if any expected HTTP status, actor, snapshot, event count, or post-delete history is missing.
+
+`.github/workflows/ci.yml` runs this test after the Phase 10 MQTT/ownership test, using an ephemeral Compose stack and generated local passwords. Ordinary unit tests are run with `cd backend && mvn test`; Java 21 and Maven 3.9+ are required when running them on the host.
+
+## Phase 12: filter and page audit history
+
+Phase 12 changes the history responses to a page envelope and adds filters; it does not change authorization, device status enforcement, policy evaluation, or audit creation. All four history APIs default to `page=0&size=100`, accept sizes from 1–100, and sort newest first (timestamp, then ID). `from` and `to` accept inclusive ISO-8601 instants ending in `Z`; invalid ranges and invalid query values return HTTP `400`.
+
+Example requests:
+
+```bash
+curl -i 'http://localhost:8080/api/access/audits?decision=DENY&reason=DEVICE_NOT_ACTIVE&page=0&size=20' \
+  -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
+
+curl -i 'http://localhost:8080/api/devices/1/status-audits?newStatus=BLOCKED&from=2026-10-01T00%3A00%3A00Z&page=0&size=10' \
+  -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
+
+curl -i 'http://localhost:8080/api/policies/12/audits?operation=UPDATE&changedByUsername=admin&page=0&size=10' \
+  -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
+```
+
+The JSON body contains `content`, `page`, `size`, `totalElements`, `totalPages`, `hasNext`, and `hasPrevious`. Event-specific filters are documented in `docs/api.md`; they use full-string matches; username, device-code, and resource filters ignore case and surrounding whitespace. The Phase 10 and 11 Compose integration tests verify pagination/filtering for access, ownership, status, and policy histories; GitHub Actions runs them on the disposable Compose stack.
+
+## Phase 13: verify audit integrity and rollback
+
+Migration V10 makes access, ownership, status, and policy audit rows append-only for normal row DML: PostgreSQL rejects UPDATE/DELETE operations. This is not tamper-proof storage against a database owner who can alter or disable triggers. The opt-in integration test uses temporary PostgreSQL triggers to make selected inserts/deletes fail, then checks that the paired device/policy mutation also rolls back. It also forces two real status changes to share a timestamp to verify the ID-descending page tie-break. The test creates a USER, device, policy, and associated audit rows that remain in the local database; run it only on a disposable/demo Compose stack. Temporary failure/timestamp triggers are removed in cleanup.
+
+```bash
+set -a
+. ./.env
+set +a
+export PHASE13_INTEGRATION=true
+export PHASE13_ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+export PHASE13_ADMIN_PASSWORD="$ADMIN_PASSWORD"
+export PHASE13_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
+(cd backend && mvn -Dtest=Phase13AuditIntegrityComposeIntegrationTest test)
+```
+
+Expected checks: a status change, owner transfer, policy create, or policy update whose audit insert fails returns an error and leaves the mutation unchanged; a policy DELETE whose database delete fails also rolls back the already-inserted DELETE event. Direct UPDATE/DELETE attempts against each audit table are rejected and the rows remain readable. The status-history page at `page=0&size=1` returns the larger ID when both events have the same timestamp, and page 1 returns the other event. Authorization and decision behavior are unchanged: the fixture's active device with an unmatched resource returns HTTP `200` with `DENY` / `NO_MATCHING_POLICY`; existing explicit-DENY precedence, `DEVICE_NOT_ACTIVE`, and default DENY still apply. The test needs the Docker Compose CLI because it temporarily runs `psql` inside the local PostgreSQL container; the triggers carry unique test names and are removed during test cleanup.
+
+Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, and 13 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, and `PHASE13_INTEGRATION` environment variables. GitHub Actions runs all three against an ephemeral Compose stack.
 
 ## Security locations and limitations
 
@@ -268,10 +339,11 @@ Use Java 21 and Maven 3.9+ on the host. To run unit tests without Compose, use `
 - `MqttDynamicSecurityService` uses verified TLS and the dedicated Dynamic Security administrator to provision/rotate device credentials. Broker accounts stay enabled across device-status changes so the backend can audit `DEVICE_NOT_ACTIVE` denials.
 - Mosquitto Dynamic Security assigns each device a unique role with one literal publish ACL for `iot/telemetry/{deviceCode}`; the backend subscriber uses a distinct least-privilege account.
 - `TelemetryIngestionService` validates payload shape and sequence, then applies the same active-status/policy decision. Accepted sequence advancement and telemetry persistence are atomic; repeated/lower sequences are audited and not stored.
-- `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService` records successful transfers separately. Access, ownership-history, and telemetry read endpoints are restricted to `ADMIN` and `SECURITY_ANALYST`.
+- `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService`, `DeviceStatusAuditService`, and `PolicyChangeAuditService` persist their respective management histories separately. Access-decision, ownership, status-change, policy-change, and telemetry history reads are restricted to `ADMIN` and `SECURITY_ANALYST`.
+- Device status transitions and policy CREATE/UPDATE/DELETE audits share the transaction with the mutation. No-op status changes and rejected requests create no event; policy DELETE history remains available by policy ID after the live policy row is removed.
 - No role can override an explicit `DENY`; missing policies default to `DENY`.
 
-This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, and replay sequence checking, but no signed application payloads, credential expiry, automated CA rotation, MFA, rate limiting, policy-change/API-authentication auditing, or production secret management.
+This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, and replay sequence checking, but no signed application payloads, credential expiry, automated CA rotation, MFA, API-authentication auditing, rate limiting, or production secret management.
 
 ## Useful commands
 

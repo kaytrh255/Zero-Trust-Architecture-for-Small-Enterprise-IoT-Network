@@ -1,4 +1,4 @@
-name: Build and Compose integration
+name: Build and Compose integration (Phase 13)
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: phase10-ci-${{ github.ref }}
+  group: phase13-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -44,6 +44,8 @@ jobs:
             sed -i "s|^${key}=.*|${key}=${value}|" .env
             if [ "${key}" = ADMIN_PASSWORD ]; then
               echo "PHASE10_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
+              echo "PHASE11_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
+              echo "PHASE13_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
             fi
           done
           jwt_secret="$(openssl rand -base64 32 | tr -d '\n')"
@@ -69,7 +71,7 @@ jobs:
             | grep -Ei 'not author|denied|error|iot/telemetry|dynsec' || true
           exit 1
 
-      - name: Run Phase 10 Compose integration test
+      - name: Run Phase 10 and 12 Compose integration test
         working-directory: backend
         env:
           PHASE10_INTEGRATION: 'true'
@@ -78,6 +80,22 @@ jobs:
           PHASE10_MQTT_BROKER_URI: ssl://127.0.0.1:8883
           PHASE10_MQTT_CA_FILE: ${{ github.workspace }}/mosquitto/tls/ca.crt
         run: mvn --batch-mode -Dtest=Phase10ComposeIntegrationTest test
+
+      - name: Run Phase 11 and 12 audit integration test
+        working-directory: backend
+        env:
+          PHASE11_INTEGRATION: 'true'
+          PHASE11_ADMIN_USERNAME: admin
+          PHASE11_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase11ComposeIntegrationTest test
+
+      - name: Run Phase 13 audit integrity integration test
+        working-directory: backend
+        env:
+          PHASE13_INTEGRATION: 'true'
+          PHASE13_ADMIN_USERNAME: admin
+          PHASE13_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase13AuditIntegrityComposeIntegrationTest test
 
       - name: Add Maven test reports to the job summary
         if: always()
@@ -95,18 +113,22 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           done
 
-      - name: Annotate Phase 10 failure details
+      - name: Annotate Compose integration test failure details
         if: failure()
         working-directory: backend
         shell: bash
         run: |
-          report=target/surefire-reports/com.yak.zerotrust.integration.Phase10ComposeIntegrationTest.txt
-          if [ ! -f "$report" ] || ! grep -Eq 'Failures: [1-9][0-9]*|Errors: [1-9][0-9]*' "$report"; then
-            exit 0
-          fi
-          detail="$(head -c 6000 "$report" | tr '\r\n' '  ' | tr -s ' ')"
-          detail="${detail//'%'/'%25'}"
-          echo "::error title=Phase 10 integration test failure::${detail}"
+          for report in \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase10ComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase11ComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase13AuditIntegrityComposeIntegrationTest.txt; do
+            if [ ! -f "$report" ] || ! grep -Eq 'Failures: [1-9][0-9]*|Errors: [1-9][0-9]*' "$report"; then
+              continue
+            fi
+            detail="$(head -c 6000 "$report" | tr '\r\n' '  ' | tr -s ' ')"
+            detail="${detail//'%'/'%25'}"
+            echo "::error title=Compose integration test failure::${detail}"
+          done
 
       - name: Annotate backend error details
         if: failure()
@@ -126,7 +148,7 @@ jobs:
         shell: bash
         run: |
           broker_log="$(docker compose logs --no-color --since 1m mosquitto 2>&1 \
-            | grep -Ei 'not author|denied|acl|error|PHASE10-SENSOR|PHASE10-ACTUATOR|iot/telemetry' \
+            | grep -Ei 'not author|denied|acl|error|PHASE10-SENSOR|PHASE10-ACTUATOR|PHASE11-SENSOR|iot/telemetry' \
             | tail -n 40 | awk '{printf "%s ", $0}' | tr -s ' ' || true)"
           if [ -n "$broker_log" ]; then
             broker_log="${broker_log:0:6000}"
@@ -140,7 +162,7 @@ jobs:
         run: |
           docker compose logs --no-color --timestamps postgres mqtt-init mqtt-bootstrap backend || true
           docker compose logs --no-color --timestamps mosquitto \
-            | grep -Ei 'PUBLISH.*iot/telemetry|not author|denied|PHASE10-|iot/telemetry|dynsec:.*(createClient|modifyClient)' || true
+            | grep -Ei 'PUBLISH.*iot/telemetry|not author|denied|PHASE10-|PHASE11-|iot/telemetry|dynsec:.*(createClient|modifyClient)' || true
 
       - name: Stop stack and remove ephemeral volumes
         if: always()

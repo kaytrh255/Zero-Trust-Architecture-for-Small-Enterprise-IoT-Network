@@ -92,6 +92,19 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, "BAD_REQUEST", "Request body is missing or invalid", request);
     }
 
+    @ExceptionHandler(InvalidAuditQueryException.class)
+    public ResponseEntity<ApiError> handleInvalidAuditQuery(
+            InvalidAuditQueryException exception,
+            HttpServletRequest request
+    ) {
+        return error(HttpStatus.BAD_REQUEST, "INVALID_AUDIT_QUERY", exception.getMessage(), request);
+    }
+
+    @ExceptionHandler(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiError> handleInvalidParameter(HttpServletRequest request) {
+        return error(HttpStatus.BAD_REQUEST, "INVALID_PARAMETER", "A request parameter has an invalid value", request);
+    }
+
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ApiError> handleAccessDenied(HttpServletRequest request) {
         return error(HttpStatus.FORBIDDEN, "ACCESS_DENIED", "You do not have permission to perform this operation", request);
