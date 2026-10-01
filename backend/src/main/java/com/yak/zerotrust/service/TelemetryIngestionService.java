@@ -1,6 +1,5 @@
 package com.yak.zerotrust.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yak.zerotrust.access.AccessChannel;
 import com.yak.zerotrust.access.AccessContext;
@@ -22,6 +21,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Locale;
@@ -150,7 +150,7 @@ public class TelemetryIngestionService {
                 throw new IllegalArgumentException("MQTT signed envelope must contain payload and signature");
             }
             return envelope;
-        } catch (JsonProcessingException exception) {
+        } catch (IOException exception) {
             throw new IllegalArgumentException("MQTT signed envelope must be valid JSON", exception);
         }
     }
@@ -158,7 +158,7 @@ public class TelemetryIngestionService {
     private TelemetryPayload parseTelemetryPayload(byte[] signedPayload) {
         try {
             return objectMapper.readValue(signedPayload, TelemetryPayload.class);
-        } catch (JsonProcessingException exception) {
+        } catch (IOException exception) {
             throw new IllegalArgumentException("Signed MQTT telemetry payload must be valid JSON", exception);
         }
     }
