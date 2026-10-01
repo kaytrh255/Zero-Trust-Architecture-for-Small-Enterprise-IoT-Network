@@ -5,9 +5,9 @@ import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.entity.Device;
 import com.yak.zerotrust.entity.DeviceStatus;
 import com.yak.zerotrust.entity.DeviceType;
-import com.yak.zerotrust.exception.DeviceConflictException;
 import com.yak.zerotrust.entity.UserAccount;
 import com.yak.zerotrust.entity.UserRole;
+import com.yak.zerotrust.exception.DeviceConflictException;
 import com.yak.zerotrust.exception.InvalidDeviceOwnerException;
 import com.yak.zerotrust.exception.UserNotFoundException;
 import com.yak.zerotrust.mqtt.MqttDynamicSecurityService;
@@ -19,6 +19,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.lang.reflect.Field;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -43,6 +44,9 @@ class DeviceServiceTest {
 
     @Mock
     private MqttDynamicSecurityService mqttDynamicSecurityService;
+
+    @Mock
+    private DeviceOwnershipAuditService deviceOwnershipAuditService;
 
     @Test
     void createsABrokerClientAndReturnsItsCredentialsOnce() {
@@ -127,23 +131,50 @@ class DeviceServiceTest {
     }
 
     @Test
-    void transfersDeviceOwnershipToAnEnabledUserUsingNormalizedUsername() {
+    void transfersDeviceOwnershipAndRecordsTheAdminAndOwnerSnapshots() {
+        UserAccount previousOwner = new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true);
+        UserAccount newOwner = new UserAccount("student1", "hash", "Student One", UserRole.USER, true);
+        setEntityId(previousOwner, 7L);
+        setEntityId(newOwner, 8L);
         Device device = new Device(
                 "SENSOR-003",
                 "Temperature Sensor 3",
                 DeviceType.SENSOR,
                 "192.168.10.24",
                 "SENSOR-003",
-                new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true)
+                previousOwner
         );
-        UserAccount newOwner = new UserAccount("student1", "hash", "Student One", UserRole.USER, true);
+        setEntityId(device, 3L);
         when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
         when(userRepository.findByUsername("student1")).thenReturn(Optional.of(newOwner));
 
-        var response = service().transferOwnership(3L, " Student1 ");
+        var response = service().transferOwnership(3L, " Student1 ", 7L, "admin");
 
         assertThat(response.ownerUsername()).isEqualTo("student1");
         assertThat(device.getOwner()).isSameAs(newOwner);
+        verify(deviceOwnershipAuditService).recordTransfer(device, previousOwner, newOwner, 7L, "admin");
+    }
+
+    @Test
+    void doesNotRecordAnAuditForAnIdempotentOwnershipAssignment() {
+        UserAccount owner = new UserAccount("student1", "hash", "Student One", UserRole.USER, true);
+        setEntityId(owner, 8L);
+        Device device = new Device(
+                "SENSOR-003",
+                "Temperature Sensor 3",
+                DeviceType.SENSOR,
+                "192.168.10.24",
+                "SENSOR-003",
+                owner
+        );
+        setEntityId(device, 3L);
+        when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
+        when(userRepository.findByUsername("student1")).thenReturn(Optional.of(owner));
+
+        var response = service().transferOwnership(3L, " Student1 ", 7L, "admin");
+
+        assertThat(response.ownerUsername()).isEqualTo("student1");
+        verify(deviceOwnershipAuditService, never()).recordTransfer(any(), any(), any(), any(), anyString());
     }
 
     @Test
@@ -160,7 +191,7 @@ class DeviceServiceTest {
         when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
         when(userRepository.findByUsername("another-admin")).thenReturn(Optional.of(admin));
 
-        assertThatThrownBy(() -> service().transferOwnership(3L, "another-admin"))
+        assertThatThrownBy(() -> service().transferOwnership(3L, "another-admin", 7L, "admin"))
                 .isInstanceOf(InvalidDeviceOwnerException.class);
         assertThat(device.getOwner().getUsername()).isEqualTo("admin");
     }
@@ -178,7 +209,7 @@ class DeviceServiceTest {
         when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
         when(userRepository.findByUsername("missing-user")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service().transferOwnership(3L, " Missing-User "))
+        assertThatThrownBy(() -> service().transferOwnership(3L, " Missing-User ", 7L, "admin"))
                 .isInstanceOf(UserNotFoundException.class);
         assertThat(device.getOwner().getUsername()).isEqualTo("admin");
     }
@@ -197,7 +228,7 @@ class DeviceServiceTest {
         when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
         when(userRepository.findByUsername("student1")).thenReturn(Optional.of(disabledUser));
 
-        assertThatThrownBy(() -> service().transferOwnership(3L, "student1"))
+        assertThatThrownBy(() -> service().transferOwnership(3L, "student1", 7L, "admin"))
                 .isInstanceOf(InvalidDeviceOwnerException.class);
         assertThat(device.getOwner().getUsername()).isEqualTo("admin");
     }
@@ -207,8 +238,19 @@ class DeviceServiceTest {
                 deviceRepository,
                 userRepository,
                 deviceCredentialService,
-                mqttDynamicSecurityService
+                mqttDynamicSecurityService,
+                deviceOwnershipAuditService
         );
+    }
+
+    private void setEntityId(Object entity, Long id) {
+        try {
+            Field idField = entity.getClass().getDeclaredField("id");
+            idField.setAccessible(true);
+            idField.set(entity, id);
+        } catch (ReflectiveOperationException exception) {
+            throw new AssertionError("Unable to prepare persisted test entity", exception);
+        }
     }
 
     private DeviceRequest request() {

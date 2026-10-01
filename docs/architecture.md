@@ -19,7 +19,7 @@ Spring Boot application <====== verified TLS ======> Mosquitto :8883
   ├── PolicyController / PolicyService
   ├── AccessController / ZeroTrustDecisionService
   ├── ProtectedResourceController / ProtectedResourceService
-  ├── AccessAuditService / TelemetryIngestionService
+  ├── AccessAuditService / DeviceOwnershipAuditService / TelemetryIngestionService
   ├── repositories / Flyway migrations
   └── TelemetryQueryService
       |
@@ -63,6 +63,10 @@ GET /api/resources/devices/{deviceCode}/telemetry
 
 The API returns a policy decision for `/api/access/check`; it is not a reverse proxy or general enforcement layer for arbitrary IoT services. Access checks are attributed to the authenticated user. Policy subject and device state come from the registered device, not the request payload. API requester roles `USER` and `DEVICE` are evaluated; management roles get a recorded business DENY. The protected-resource path names the target device; the JWT supplies requester identity. For protected reads, an enabled USER must match `devices.owner_id`. ADMINs assign/transfer device ownership; non-owner DENYs are audited and do not query telemetry. The decision-only `/api/access/check` endpoint does not fetch protected data or apply this ownership check.
 
+## Device ownership transfer audit
+
+`PATCH /api/devices/{id}/owner` resolves the requested enabled USER and compares persisted owner IDs. A real change updates `devices.owner_id` and inserts an immutable `device_ownership_audits` snapshot in the same transaction; a failed transfer or same-owner no-op does not create an event. The snapshot records device code, previous/new owner IDs and usernames, authenticated ADMIN ID/username, and timestamp. `GET /api/devices/{id}/ownership-audits` returns up to 100 newest transfer events to ADMIN and SECURITY_ANALYST roles. This management history is separate from `access_audits`, which records access decisions.
+
 ## MQTT identity, TLS, and telemetry path
 
 ```text
@@ -89,4 +93,4 @@ Mosquitto authenticates the MQTT username and assigns that device a role with a 
 
 ## Persistence
 
-Flyway migrations `V1__create_users.sql` through `V7__add_device_ownership_denial_reason.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed audit reasons. Device ownership itself is already represented by `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.
+Flyway migrations `V1__create_users.sql` through `V8__audit_device_ownership_transfers.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed access-audit reasons; V8 creates the separate append-only ownership-transfer history table. Device ownership itself remains in `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.

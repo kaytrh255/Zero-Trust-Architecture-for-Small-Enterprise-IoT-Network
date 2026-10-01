@@ -99,7 +99,30 @@ Request:
 }
 ```
 
-The account must exist, be enabled, and have role `USER`. Surrounding whitespace is trimmed and the username is normalized to lowercase before lookup. Returns HTTP `200 OK` with the updated `DeviceResponse`, including `ownerId` and `ownerUsername`. A nonexistent username returns `404`; an ADMIN, `SECURITY_ANALYST`, `DEVICE`, or disabled account is rejected with `400`. Non-ADMIN callers receive `403`. Invalid requests never change the owner.
+The account must exist, be enabled, and have role `USER`. Surrounding whitespace is trimmed and the username is normalized to lowercase before lookup. Returns HTTP `200 OK` with the updated `DeviceResponse`, including `ownerId` and `ownerUsername`. A successful change to a different owner writes a transfer-history event in the same database transaction; assigning the current owner again is an idempotent no-op and creates no event. A nonexistent username returns `404`; an ADMIN, `SECURITY_ANALYST`, `DEVICE`, or disabled account is rejected with `400`. Non-ADMIN callers receive `403`. Invalid requests never change the owner or create a successful-transfer event.
+
+### `GET /api/devices/{id}/ownership-audits` — `ADMIN`, `SECURITY_ANALYST` (Phase 10)
+
+Returns up to the 100 most recent successful ownership transfers for the device, newest first. Each immutable event includes device ID/code, previous and new owner IDs/usernames as snapshots, the acting ADMIN's ID/username, and `changedAt`:
+
+```json
+[
+  {
+    "id": 12,
+    "deviceId": 3,
+    "deviceCode": "SENSOR-001",
+    "previousOwnerId": 1,
+    "previousOwnerUsername": "admin",
+    "newOwnerId": 9,
+    "newOwnerUsername": "student1",
+    "changedByUserId": 1,
+    "changedByUsername": "admin",
+    "changedAt": "2026-10-01T12:00:00Z"
+  }
+]
+```
+
+Device creation's initial owner assignment is not a transfer event; reassigning the same owner and failed requests also create no event. An unknown device returns `404`; other roles receive `403`. The events are stored in `device_ownership_audits`, separately from access-decision records.
 
 ### `PATCH /api/devices/{id}/status` — `ADMIN`
 

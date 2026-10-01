@@ -1,5 +1,6 @@
 package com.yak.zerotrust.service;
 
+import com.yak.zerotrust.dto.DeviceOwnershipAuditResponse;
 import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.dto.DeviceResponse;
@@ -19,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 
 @Service
 public class DeviceService {
@@ -27,17 +29,20 @@ public class DeviceService {
     private final UserRepository userRepository;
     private final DeviceCredentialService deviceCredentialService;
     private final MqttDynamicSecurityService mqttDynamicSecurityService;
+    private final DeviceOwnershipAuditService deviceOwnershipAuditService;
 
     public DeviceService(
             DeviceRepository deviceRepository,
             UserRepository userRepository,
             DeviceCredentialService deviceCredentialService,
-            MqttDynamicSecurityService mqttDynamicSecurityService
+            MqttDynamicSecurityService mqttDynamicSecurityService,
+            DeviceOwnershipAuditService deviceOwnershipAuditService
     ) {
         this.deviceRepository = deviceRepository;
         this.userRepository = userRepository;
         this.deviceCredentialService = deviceCredentialService;
         this.mqttDynamicSecurityService = mqttDynamicSecurityService;
+        this.deviceOwnershipAuditService = deviceOwnershipAuditService;
     }
 
     @Transactional(readOnly = true)
@@ -50,6 +55,12 @@ public class DeviceService {
     @Transactional(readOnly = true)
     public DeviceResponse getById(Long id) {
         return toResponse(findDevice(id));
+    }
+
+    @Transactional(readOnly = true)
+    public List<DeviceOwnershipAuditResponse> getOwnershipAudits(Long id) {
+        findDevice(id);
+        return deviceOwnershipAuditService.getRecentForDevice(id);
     }
 
     @Transactional
@@ -116,7 +127,12 @@ public class DeviceService {
     }
 
     @Transactional
-    public DeviceResponse transferOwnership(Long id, String ownerUsername) {
+    public DeviceResponse transferOwnership(
+            Long id,
+            String ownerUsername,
+            Long changedByUserId,
+            String changedByUsername
+    ) {
         Device device = findDevice(id);
         String normalizedUsername = ownerUsername.trim().toLowerCase(Locale.ROOT);
         UserAccount owner = userRepository.findByUsername(normalizedUsername)
@@ -124,7 +140,20 @@ public class DeviceService {
         if (owner.getRole() != UserRole.USER || !owner.isEnabled()) {
             throw new InvalidDeviceOwnerException();
         }
+
+        UserAccount previousOwner = device.getOwner();
+        if (Objects.equals(previousOwner.getId(), owner.getId())) {
+            return toResponse(device);
+        }
+
         device.changeOwner(owner);
+        deviceOwnershipAuditService.recordTransfer(
+                device,
+                previousOwner,
+                owner,
+                changedByUserId,
+                changedByUsername
+        );
         return toResponse(device);
     }
 

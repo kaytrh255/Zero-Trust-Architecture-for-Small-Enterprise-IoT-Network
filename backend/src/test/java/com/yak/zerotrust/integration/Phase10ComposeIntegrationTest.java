@@ -19,8 +19,8 @@ import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Locale;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
@@ -29,8 +29,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** End-to-end checks against an already running local Docker Compose stack. */
-@EnabledIfEnvironmentVariable(named = "PHASE9_INTEGRATION", matches = "true")
-class Phase9ComposeIntegrationTest {
+@EnabledIfEnvironmentVariable(named = "PHASE10_INTEGRATION", matches = "true")
+class Phase10ComposeIntegrationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(10);
@@ -39,48 +39,52 @@ class Phase9ComposeIntegrationTest {
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
             .build();
-    private final String baseUrl = environment("PHASE9_BASE_URL", "http://127.0.0.1:8080");
+    private final String baseUrl = environment("PHASE10_BASE_URL", "http://127.0.0.1:8080");
     private final String brokerUri = environment(
-            "PHASE9_MQTT_BROKER_URI",
+            "PHASE10_MQTT_BROKER_URI",
             "ssl://127.0.0.1:" + environment("MQTT_PORT", "8883")
     );
-    private final Path caFile = Path.of(environment("PHASE9_MQTT_CA_FILE", "../mosquitto/tls/ca.crt"))
+    private final Path caFile = Path.of(environment("PHASE10_MQTT_CA_FILE", "../mosquitto/tls/ca.crt"))
             .toAbsolutePath();
 
     @Test
     @Timeout(value = 240, unit = TimeUnit.SECONDS)
     void composeStackEnforcesTlsBrokerAclStatusPolicyReplayAndProtectedResource() throws Exception {
-        String adminToken = login(
-                environment("PHASE9_ADMIN_USERNAME", environment("ADMIN_USERNAME", "admin")),
-                requiredEnvironment("PHASE9_ADMIN_PASSWORD", "ADMIN_PASSWORD")
-        );
+        String adminUsername = environment("PHASE10_ADMIN_USERNAME", environment("ADMIN_USERNAME", "admin"))
+                .trim()
+                .toLowerCase(Locale.ROOT);
+        String adminToken = login(adminUsername, requiredEnvironment("PHASE10_ADMIN_PASSWORD", "ADMIN_PASSWORD"));
         HttpResult health = request("GET", "/actuator/health", null, null);
         assertStatus(health, 200);
         assertThat(health.body().path("status").asText()).isEqualTo("UP");
 
         String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 10).toUpperCase();
-        String sensorCode = "PHASE9-SENSOR-" + suffix;
-        String actuatorCode = "PHASE9-ACTUATOR-" + suffix;
+        String sensorCode = "PHASE10-SENSOR-" + suffix;
+        String actuatorCode = "PHASE10-ACTUATOR-" + suffix;
         String userSuffix = suffix.toLowerCase();
-        String ownerUsername = "phase9-owner-" + userSuffix;
-        String nonOwnerUsername = "phase9-outsider-" + userSuffix;
-        String ownerPassword = "Phase9!" + userSuffix + "Aa";
-        String nonOwnerPassword = "Phase9!outsider-" + userSuffix + "Aa";
+        String ownerUsername = "phase10-owner-" + userSuffix;
+        String nonOwnerUsername = "phase10-outsider-" + userSuffix;
+        String ownerPassword = "Phase10!" + userSuffix + "Aa";
+        String nonOwnerPassword = "Phase10!outsider-" + userSuffix + "Aa";
         registerUser(ownerUsername, ownerPassword);
         registerUser(nonOwnerUsername, nonOwnerPassword);
         String ownerToken = login(ownerUsername, ownerPassword);
         String nonOwnerToken = login(nonOwnerUsername, nonOwnerPassword);
 
         DeviceCredentials originalSensor = createDevice(adminToken, sensorCode, "SENSOR");
+        JsonNode initialDevice = getDevice(adminToken, originalSensor.deviceId());
+        long adminId = initialDevice.path("ownerId").asLong();
+        assertThat(adminId).isPositive();
+
         HttpResult invalidOwnerChange = request(
                 "PATCH",
                 "/api/devices/" + originalSensor.deviceId() + "/owner",
                 adminToken,
-                JSON.createObjectNode().put("ownerUsername", "admin")
+                JSON.createObjectNode().put("ownerUsername", adminUsername)
         );
         assertStatus(invalidOwnerChange, 400);
         assertThat(getDevice(adminToken, originalSensor.deviceId()).path("ownerUsername").asText())
-                .isEqualTo("admin");
+                .isEqualTo(adminUsername);
 
         HttpResult forbiddenOwnerChange = request(
                 "PATCH",
@@ -89,11 +93,33 @@ class Phase9ComposeIntegrationTest {
                 JSON.createObjectNode().put("ownerUsername", nonOwnerUsername)
         );
         assertStatus(forbiddenOwnerChange, 403);
+        assertThat(ownershipAudits(adminToken, originalSensor.deviceId())).isEmpty();
 
         DeviceCredentials sensor = rotateCredentials(adminToken, originalSensor);
         transferOwnership(adminToken, sensor.deviceId(), ownerUsername);
-        assertThat(getDevice(adminToken, sensor.deviceId()).path("ownerUsername").asText())
-                .isEqualTo(ownerUsername);
+        JsonNode transferredDevice = getDevice(adminToken, sensor.deviceId());
+        assertThat(transferredDevice.path("ownerUsername").asText()).isEqualTo(ownerUsername);
+        long newOwnerId = transferredDevice.path("ownerId").asLong();
+
+        List<JsonNode> ownershipHistory = ownershipAudits(adminToken, sensor.deviceId());
+        assertThat(ownershipHistory).hasSize(1);
+        JsonNode transfer = ownershipHistory.getFirst();
+        assertThat(transfer.path("deviceCode").asText()).isEqualTo(sensorCode);
+        assertThat(transfer.path("previousOwnerId").asLong()).isEqualTo(adminId);
+        assertThat(transfer.path("previousOwnerUsername").asText()).isEqualTo(adminUsername);
+        assertThat(transfer.path("newOwnerId").asLong()).isEqualTo(newOwnerId);
+        assertThat(transfer.path("newOwnerUsername").asText()).isEqualTo(ownerUsername);
+        assertThat(transfer.path("changedByUserId").asLong()).isEqualTo(adminId);
+        assertThat(transfer.path("changedByUsername").asText()).isEqualTo(adminUsername);
+        assertThat(transfer.path("changedAt").asText()).isNotBlank();
+
+        HttpResult forbiddenHistory = request(
+                "GET", "/api/devices/" + sensor.deviceId() + "/ownership-audits", ownerToken, null
+        );
+        assertStatus(forbiddenHistory, 403);
+
+        transferOwnership(adminToken, sensor.deviceId(), ownerUsername);
+        assertThat(ownershipAudits(adminToken, sensor.deviceId())).hasSize(1);
         assertConnectionRejected(new DeviceCredentials(
                 originalSensor.deviceId(),
                 originalSensor.deviceCode(),
@@ -113,7 +139,7 @@ class Phase9ComposeIntegrationTest {
         String lastSeenAfterAllow = getDevice(adminToken, sensor.deviceId()).path("lastSeenAt").asText();
         assertThat(lastSeenAfterAllow).isNotBlank();
 
-        String otherDeviceCode = "PHASE9-OTHER-" + suffix;
+        String otherDeviceCode = "PHASE10-OTHER-" + suffix;
         tryPublish(sensor, otherDeviceCode, 1);
         assertNoAuditForDevice(adminToken, otherDeviceCode);
         assertNoTelemetry(adminToken, otherDeviceCode, null);
@@ -183,7 +209,7 @@ class Phase9ComposeIntegrationTest {
                 ownerToken,
                 JSON.createObjectNode()
                         .put("deviceCode", sensorCode)
-                        .put("resource", "phase9-no-matching-resource")
+                        .put("resource", "phase10-no-matching-resource")
                         .put("action", "READ")
         );
         assertStatus(defaultDeny, 200);
@@ -253,14 +279,14 @@ class Phase9ComposeIntegrationTest {
         JsonNode body = JSON.createObjectNode()
                 .put("username", username)
                 .put("password", password)
-                .put("fullName", "Phase 9 Integration User");
+                .put("fullName", "Phase 10 Integration User");
         assertStatus(request("POST", "/api/auth/register", null, body), 201);
     }
 
     private DeviceCredentials createDevice(String adminToken, String deviceCode, String type) throws Exception {
         JsonNode body = JSON.createObjectNode()
                 .put("deviceCode", deviceCode)
-                .put("deviceName", "Phase 9 " + type + " integration device")
+                .put("deviceName", "Phase 10 " + type + " integration device")
                 .put("deviceType", type)
                 .put("ipAddress", "192.168.250.8")
                 .put("mqttClientId", deviceCode);
@@ -299,13 +325,13 @@ class Phase9ComposeIntegrationTest {
 
     private long createTelemetryDenyPolicy(String adminToken, String suffix) throws Exception {
         JsonNode body = JSON.createObjectNode()
-                .put("name", "Phase 9 telemetry deny " + suffix)
+                .put("name", "Phase 10 telemetry deny " + suffix)
                 .put("subject", "SENSOR")
                 .put("resource", "device-telemetry")
                 .put("action", "WRITE")
                 .put("effect", "DENY")
                 .put("enabled", true)
-                .put("description", "Temporary Phase 9 integration-test policy");
+                .put("description", "Temporary Phase 10 integration-test policy");
         HttpResult result = request("POST", "/api/policies", adminToken, body);
         assertStatus(result, 201);
         return result.body().path("id").asLong();
@@ -313,13 +339,13 @@ class Phase9ComposeIntegrationTest {
 
     private long createProtectedReadDenyPolicy(String adminToken, String suffix) throws Exception {
         JsonNode body = JSON.createObjectNode()
-                .put("name", "Phase 9 protected read deny " + suffix)
+                .put("name", "Phase 10 protected read deny " + suffix)
                 .put("subject", "SENSOR")
                 .put("resource", "sensor-data")
                 .put("action", "READ")
                 .put("effect", "DENY")
                 .put("enabled", true)
-                .put("description", "Temporary Phase 9 protected-resource DENY policy");
+                .put("description", "Temporary Phase 10 protected-resource DENY policy");
         HttpResult result = request("POST", "/api/policies", adminToken, body);
         assertStatus(result, 201);
         return result.body().path("id").asLong();
@@ -336,7 +362,7 @@ class Phase9ComposeIntegrationTest {
             client.connect(connectOptions(credentials, true));
             ObjectNode payload = JSON.createObjectNode()
                     .put("sequence", sequence)
-                    .put("metric", "phase9")
+                    .put("metric", "phase10")
                     .put("value", 22.5)
                     .put("unit", "C");
             client.publish(
@@ -357,7 +383,7 @@ class Phase9ComposeIntegrationTest {
             client.connect(connectOptions(credentials, true));
             ObjectNode payload = JSON.createObjectNode()
                     .put("sequence", sequence)
-                    .put("metric", "phase9")
+                    .put("metric", "phase10")
                     .put("value", 22.5)
                     .put("unit", "C");
             client.publish(
@@ -468,6 +494,10 @@ class Phase9ComposeIntegrationTest {
         return result.body();
     }
 
+    private List<JsonNode> ownershipAudits(String adminToken, long deviceId) throws Exception {
+        return array(request("GET", "/api/devices/" + deviceId + "/ownership-audits", adminToken, null), 200);
+    }
+
     private List<JsonNode> audits(String adminToken) throws Exception {
         return array(request("GET", "/api/access/audits", adminToken, null), 200);
     }
@@ -556,7 +586,7 @@ class Phase9ComposeIntegrationTest {
             value = System.getenv(fallback);
         }
         if (value == null || value.isBlank()) {
-            throw new IllegalStateException("Set " + primary + " or " + fallback + " for Phase 9 integration checks");
+            throw new IllegalStateException("Set " + primary + " or " + fallback + " for Phase 10 integration checks");
         }
         return value;
     }

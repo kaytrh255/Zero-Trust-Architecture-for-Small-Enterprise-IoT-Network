@@ -1,6 +1,7 @@
 package com.yak.zerotrust.controller;
 
 import com.yak.zerotrust.dto.DeviceOwnerRequest;
+import com.yak.zerotrust.dto.DeviceOwnershipAuditResponse;
 import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.dto.DeviceResponse;
@@ -46,6 +47,12 @@ public class DeviceController {
         return deviceService.getById(id);
     }
 
+    @GetMapping("/{id}/ownership-audits")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SECURITY_ANALYST')")
+    public List<DeviceOwnershipAuditResponse> getOwnershipAudits(@PathVariable Long id) {
+        return deviceService.getOwnershipAudits(id);
+    }
+
     @PostMapping
     @PreAuthorize("hasRole('ADMIN')")
     @ResponseStatus(HttpStatus.CREATED)
@@ -81,9 +88,15 @@ public class DeviceController {
     @PreAuthorize("hasRole('ADMIN')")
     public DeviceResponse transferOwnership(
             @PathVariable Long id,
-            @Valid @RequestBody DeviceOwnerRequest request
+            @Valid @RequestBody DeviceOwnerRequest request,
+            @AuthenticationPrincipal UserPrincipal principal
     ) {
-        return deviceService.transferOwnership(id, request.ownerUsername());
+        return deviceService.transferOwnership(
+                id,
+                request.ownerUsername(),
+                principal.getId(),
+                principal.getUsername()
+        );
     }
 
     @DeleteMapping("/{id}")
