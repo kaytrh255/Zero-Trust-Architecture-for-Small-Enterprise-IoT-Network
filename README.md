@@ -21,6 +21,7 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 14:** separate PostgreSQL runtime and Flyway migration roles; idempotent startup bootstrapping transfers existing object ownership without discarding volumes, while Compose checks prove runtime DML still works and runtime DDL/trigger changes are denied.
 - **Phase 15:** run Flyway in its own one-shot Compose service so migration credentials are not injected into the backend container; the backend starts only after migrations complete.
 - **Phase 16:** audit successful and rejected API logins in a separate append-only history; only admins and security analysts can search the paged records, which never contain passwords or JWTs.
+- **Phase 17:** throttle login attempts per socket peer address with a bounded in-memory fixed window; excess requests receive HTTP `429` and `Retry-After`, without trusting forwarded-IP headers.
 
 The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
 
@@ -361,7 +362,7 @@ The Phase 14 Compose integration test checks this separation in CI, along with m
 
 ## Phase 16: audit API login attempts
 
-Each login request that passes request validation records a normalized attempted username, `SUCCESS` or `FAILURE`, a timestamp, and the authenticated user ID only on success. Passwords, bearer tokens, and client IP addresses are not stored. The `authentication_attempt_audits` table is append-only. Admins and security analysts can search it at `GET /api/auth/audits` using the common page/date filters plus optional `username` and `outcome` filters; ordinary users cannot read it.
+Each login request admitted to authentication processing records a normalized attempted username, `SUCCESS` or `FAILURE`, a timestamp, and the authenticated user ID only on success. Passwords, bearer tokens, and client IP addresses are not included in audit rows or API responses; the rate limiter holds the peer address in memory only for its short window. The `authentication_attempt_audits` table is append-only. Admins and security analysts can search it at `GET /api/auth/audits` using the common page/date filters plus optional `username` and `outcome` filters; ordinary users cannot read it.
 
 Run the opt-in integration check after `docker compose up --build -d` has completed successfully. It verifies success/failure records, generic 401 behavior, role protection, secret minimization, and database-level append-only enforcement. Use a disposable stack: the check leaves its generated test account and append-only events in the database.
 
@@ -376,7 +377,32 @@ export PHASE16_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
 (cd backend && mvn -Dtest=Phase16AuthenticationAuditComposeIntegrationTest test)
 ```
 
-Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, 14, and 16 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, and `PHASE16_INTEGRATION` environment variables. GitHub Actions runs the complete suite against an ephemeral Compose stack.
+## Phase 17: throttle login requests
+
+The backend allows 20 login attempts per socket peer address per 60-second fixed window by default; both values are configurable with `AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS`. A bounded in-memory map tracks peers, and excess requests receive HTTP `429` with `Retry-After`. The limiter uses `HttpServletRequest.getRemoteAddr()` and ignores client-supplied forwarding headers. A blocked request is rejected before password authentication and is not inserted into the auth-audit table, avoiding database-write amplification.
+
+This single-process limiter is appropriate for the local Compose prototype, not a multi-replica deployment or an app behind an unconfigured reverse proxy. Production deployments should use a shared rate-limit store/gateway and only honor forwarding headers from explicitly trusted proxies.
+
+Run the opt-in integration check against a disposable stack after `docker compose up --build -d` has completed successfully. Since earlier tests may already have used the process-local budget, the command restarts the backend first; it then sends valid login requests with varying spoofed `X-Forwarded-For` values and verifies the same socket peer is throttled. The check leaves failed-attempt audit rows.
+
+```bash
+set -a
+. ./.env
+set +a
+docker compose restart backend
+for attempt in $(seq 1 45); do
+  curl --fail --silent "http://127.0.0.1:${BACKEND_PORT:-8080}/actuator/health" >/dev/null && break
+  sleep 2
+done
+curl --fail --silent "http://127.0.0.1:${BACKEND_PORT:-8080}/actuator/health" >/dev/null
+export PHASE17_INTEGRATION=true
+export PHASE17_IP_MAX_ATTEMPTS="${AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS:-20}"
+export PHASE17_WINDOW_SECONDS="${AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}"
+export PHASE17_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
+(cd backend && mvn -Dtest=Phase17LoginRateLimitComposeIntegrationTest test)
+```
+
+Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, 14, 16, and 17 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, `PHASE16_INTEGRATION`, and `PHASE17_INTEGRATION` environment variables. GitHub Actions runs the complete suite against an ephemeral Compose stack.
 
 ## Security locations and limitations
 
@@ -386,11 +412,11 @@ Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, 14, and
 - `MqttDynamicSecurityService` uses verified TLS and the dedicated Dynamic Security administrator to provision/rotate device credentials. Broker accounts stay enabled across device-status changes so the backend can audit `DEVICE_NOT_ACTIVE` denials.
 - Mosquitto Dynamic Security assigns each device a unique role with one literal publish ACL for `iot/telemetry/{deviceCode}`; the backend subscriber uses a distinct least-privilege account.
 - `TelemetryIngestionService` validates payload shape and sequence, then applies the same active-status/policy decision. Accepted sequence advancement and telemetry persistence are atomic; repeated/lower sequences are audited and not stored.
-- `AuthenticationAuditService` records validated login success/failure events without credential material; `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService`, `DeviceStatusAuditService`, and `PolicyChangeAuditService` persist their respective management histories separately. Authentication, access-decision, ownership, status-change, policy-change, and telemetry history reads are restricted to `ADMIN` and `SECURITY_ANALYST`.
+- `LoginRateLimiter` throttles login attempts per socket peer in a bounded in-memory window; `AuthenticationAuditService` records admitted login success/failure events without credential material. `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService`, `DeviceStatusAuditService`, and `PolicyChangeAuditService` persist their respective management histories separately. Authentication, access-decision, ownership, status-change, policy-change, and telemetry history reads are restricted to `ADMIN` and `SECURITY_ANALYST`.
 - Device status transitions and policy CREATE/UPDATE/DELETE audits share the transaction with the mutation. No-op status changes and rejected management requests create no change event; failed login attempts are recorded separately. Policy DELETE history remains available by policy ID after the live policy row is removed.
 - No role can override an explicit `DENY`; missing policies default to `DENY`.
 
-This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, and replay sequence checking, but no signed application payloads, credential expiry, automated CA rotation, MFA, rate limiting, or production secret management.
+This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, and replay sequence checking, but no signed application payloads, credential expiry, automated CA rotation, MFA, or production secret management. Login throttling is process-local and is not a distributed production rate limiter.
 
 ## Useful commands
 

@@ -4,8 +4,10 @@ import com.yak.zerotrust.dto.AuthResponse;
 import com.yak.zerotrust.dto.LoginRequest;
 import com.yak.zerotrust.dto.RegisterRequest;
 import com.yak.zerotrust.dto.UserResponse;
+import com.yak.zerotrust.security.LoginRateLimiter;
 import com.yak.zerotrust.security.UserPrincipal;
 import com.yak.zerotrust.service.AuthService;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
@@ -23,9 +25,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class AuthController {
 
     private final AuthService authService;
+    private final LoginRateLimiter loginRateLimiter;
 
-    public AuthController(AuthService authService) {
+    public AuthController(AuthService authService, LoginRateLimiter loginRateLimiter) {
         this.authService = authService;
+        this.loginRateLimiter = loginRateLimiter;
     }
 
     @PostMapping("/register")
@@ -35,7 +39,11 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public ResponseEntity<AuthResponse> login(@Valid @RequestBody LoginRequest request) {
+    public ResponseEntity<AuthResponse> login(
+            @Valid @RequestBody LoginRequest request,
+            HttpServletRequest servletRequest
+    ) {
+        loginRateLimiter.checkAndRecord(servletRequest.getRemoteAddr());
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
                 .body(authService.login(request));

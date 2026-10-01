@@ -40,12 +40,15 @@ The broker exposes no plaintext MQTT listener. Compose generates a local CA and 
 ## Authentication request path
 
 ```text
-POST /api/auth/register or /api/auth/login
-  -> validate request
-  -> BCrypt encode or verify password
-  -> UserRepository / PostgreSQL users table
-  -> failed login: AuthenticationAuditService writes FAILURE, return generic 401
-  -> successful login: JwtService signs token, then audit SUCCESS
+POST /api/auth/register
+  -> validate request -> BCrypt hash -> UserRepository / PostgreSQL
+
+POST /api/auth/login
+  -> validate request -> LoginRateLimiter checks socket peer address
+  -> over limit: HTTP 429 + Retry-After (before password verification)
+  -> otherwise, DaoAuthenticationProvider verifies credentials
+  -> failure: AuthenticationAuditService writes FAILURE, return generic 401
+  -> success: JwtService signs token, then audit SUCCESS
 ```
 
 Protected HTTP requests pass through `JwtAuthenticationFilter`, which validates signature and expiry and reloads current user role/enabled state from PostgreSQL. `SecurityConfig` requires authentication for non-public routes; method-level rules protect management, audit, and telemetry reads.
@@ -107,4 +110,4 @@ Mosquitto authenticates the MQTT username and assigns that device a role with a 
 
 ## Persistence
 
-Flyway migrations `V1__create_users.sql` through `V11__audit_authentication_attempts.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed access-audit reasons; V8 creates the separate ownership-transfer history table; V9 adds separate status-transition and policy-change history tables with actor references and history indexes; V10 installs database triggers that reject UPDATE and DELETE statements on the four business audit-history tables; V11 adds a separate append-only table for validated API login attempts. Device ownership itself remains in `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically. Phase 14 configures a DML-only runtime role and a separate DDL-capable migration role. Phase 15 runs Flyway in a dedicated one-shot `db-migrate` container rather than Spring Boot; its migration credentials are not passed to the backend, and backend startup waits for migrations to complete. Compose's idempotent `db-roles-init` transfers `public` schema/table/sequence/view and audit-function ownership to the migration role before migration/backend startup, including on an existing volume; the runtime role receives only application DML and cannot disable/drop the append-only triggers.
+Flyway migrations `V1__create_users.sql` through `V11__audit_authentication_attempts.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed access-audit reasons; V8 creates the separate ownership-transfer history table; V9 adds separate status-transition and policy-change history tables with actor references and history indexes; V10 installs database triggers that reject UPDATE and DELETE statements on the four business audit-history tables; V11 adds a separate append-only table for validated API login attempts. Device ownership itself remains in `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically. Phase 14 configures a DML-only runtime role and a separate DDL-capable migration role. Phase 15 runs Flyway in a dedicated one-shot `db-migrate` container rather than Spring Boot; its migration credentials are not passed to the backend, and backend startup waits for migrations to complete. Phase 17 applies a bounded in-memory source-IP login limiter before password verification. Compose's idempotent `db-roles-init` transfers `public` schema/table/sequence/view and audit-function ownership to the migration role before migration/backend startup, including on an existing volume; the runtime role receives only application DML and cannot disable/drop the append-only triggers.

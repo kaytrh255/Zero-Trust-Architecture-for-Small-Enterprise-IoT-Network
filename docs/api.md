@@ -37,7 +37,7 @@ Request:
 }
 ```
 
-Successful response: HTTP `200 OK` with `accessToken`, `tokenType` (`Bearer`), `expiresInSeconds`, and a safe user profile. Wrong credentials return `401 Unauthorized` with a generic message. Each validated login request is recorded separately in authentication-attempt history; the audit stores no password or token.
+Successful response: HTTP `200 OK` with `accessToken`, `tokenType` (`Bearer`), `expiresInSeconds`, and a safe user profile. Wrong credentials return `401 Unauthorized` with a generic message. Login requests admitted to authentication are recorded separately in authentication-attempt history; the audit stores no password, token, or client IP. By default, one socket peer may make 20 login requests per 60-second fixed window; `AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS` configure the limit. Excess requests return `429 Too Many Requests` with a `Retry-After` header before password verification and do not create audit rows. Client IPs are used transiently by the in-memory limiter, not persisted in the audit table.
 
 ### `GET /api/auth/me` — authenticated
 
@@ -45,7 +45,7 @@ Send the token from login in the `Authorization` header. Returns the current use
 
 ### `GET /api/auth/audits` — `ADMIN`, `SECURITY_ANALYST` (Phase 16)
 
-Searches validated login attempts with the common page envelope. Optional filters are `page`, `size`, inclusive `from` / `to`, `username` (case-insensitive), and `outcome` (`SUCCESS` or `FAILURE`). Failed attempts use the same generic `401` response for unknown users and incorrect passwords; their audit rows have no authenticated user ID. Successful rows include the authenticated user's ID. Passwords, JWTs, and client IP addresses are never stored or returned. `USER` callers receive `403 Forbidden`.
+Searches validated login attempts with the common page envelope. Optional filters are `page`, `size`, inclusive `from` / `to`, `username` (case-insensitive), and `outcome` (`SUCCESS` or `FAILURE`). Failed attempts use the same generic `401` response for unknown users and incorrect passwords; their audit rows have no authenticated user ID. Successful rows include the authenticated user's ID. Passwords and JWTs are never stored or returned. Client IPs are not persisted in this history or returned; the process-local rate limiter keeps them only for the active window. `USER` callers receive `403 Forbidden`.
 
 Example response item:
 
@@ -338,6 +338,6 @@ Validation, authentication, authorization, and application errors use a consiste
 }
 ```
 
-Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role or a DENY at the protected telemetry route, `404` missing resource, `409` duplicate/immutable identity, and `500` unexpected server error. A DENY from `POST /api/access/check` is an HTTP `200` decision body. A protected resource DENY is HTTP `403` with a `ProtectedTelemetryResponse` containing the access decision and an empty telemetry array, not an `ApiError` body.
+Typical status codes: `400` invalid request, `401` missing/invalid authentication or rejected login, `403` insufficient role or a DENY at the protected telemetry route, `404` missing resource, `409` duplicate/immutable identity, `429` login rate limit exceeded (includes `Retry-After`), and `500` unexpected server error. A DENY from `POST /api/access/check` is an HTTP `200` decision body. A protected resource DENY is HTTP `403` with a `ProtectedTelemetryResponse` containing the access decision and an empty telemetry array, not an `ApiError` body.
 
-Dashboard endpoints, application-level MQTT message signatures, and transparent enforcement on arbitrary IoT resources are not implemented. Phase 11 provides separate audit history for successful device-status transitions and policy mutations; Phase 16 adds a distinct, append-only history for validated API login attempts.
+Dashboard endpoints, application-level MQTT message signatures, and transparent enforcement on arbitrary IoT resources are not implemented. Phase 11 provides separate audit history for successful device-status transitions and policy mutations; Phase 16 adds a distinct, append-only history for admitted API login attempts; Phase 17 applies a bounded, process-local source-IP limiter, not a distributed production gateway.

@@ -1,4 +1,4 @@
-name: Build and Compose integration (Phase 16)
+name: Build and Compose integration (Phase 17)
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: phase16-ci-${{ github.ref }}
+  group: phase17-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -115,6 +115,30 @@ jobs:
           PHASE16_BASE_URL: http://127.0.0.1:8080
         run: mvn --batch-mode -Dtest=Phase16AuthenticationAuditComposeIntegrationTest test
 
+      - name: Reset process-local limiter before Phase 17
+        run: docker compose restart backend
+
+      - name: Wait for backend after rate-limit reset
+        shell: bash
+        run: |
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/actuator/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color --timestamps backend || true
+          exit 1
+
+      - name: Run Phase 17 login rate-limit integration test
+        working-directory: backend
+        env:
+          PHASE17_INTEGRATION: 'true'
+          PHASE17_IP_MAX_ATTEMPTS: '20'
+          PHASE17_WINDOW_SECONDS: '60'
+          PHASE17_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase17LoginRateLimitComposeIntegrationTest test
+
       - name: Add Maven test reports to the job summary
         if: always()
         shell: bash
@@ -141,7 +165,8 @@ jobs:
             target/surefire-reports/com.yak.zerotrust.integration.Phase11ComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase13AuditIntegrityComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase14DatabaseRolesComposeIntegrationTest.txt \
-            target/surefire-reports/com.yak.zerotrust.integration.Phase16AuthenticationAuditComposeIntegrationTest.txt; do
+            target/surefire-reports/com.yak.zerotrust.integration.Phase16AuthenticationAuditComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase17LoginRateLimitComposeIntegrationTest.txt; do
             if [ ! -f "$report" ] || ! grep -Eq 'Failures: [1-9][0-9]*|Errors: [1-9][0-9]*' "$report"; then
               continue
             fi

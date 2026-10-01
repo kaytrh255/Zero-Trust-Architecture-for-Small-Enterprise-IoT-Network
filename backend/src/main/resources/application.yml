@@ -21,6 +21,10 @@ security:
   jwt:
     secret: ${JWT_SECRET}
     expiration-seconds: ${JWT_EXPIRATION_SECONDS:3600}
+  login-rate-limit:
+    max-attempts: ${AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS:20}
+    window-seconds: ${AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS:60}
+    max-tracked-clients: ${AUTH_LOGIN_RATE_LIMIT_MAX_TRACKED_CLIENTS:10000}
 
 app:
   bootstrap:
