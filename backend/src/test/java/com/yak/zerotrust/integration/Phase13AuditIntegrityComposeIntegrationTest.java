@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -31,9 +32,9 @@ class Phase13AuditIntegrityComposeIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(10);
     private static final String PSQL_COMMAND =
-            "psql -v ON_ERROR_STOP=1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"$1\"";
+            "psql -v ON_ERROR_STOP=1 -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\"";
     private static final String PSQL_QUERY_COMMAND =
-            "psql -v ON_ERROR_STOP=1 -t -A -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"$1\"";
+            "psql -v ON_ERROR_STOP=1 -t -A -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\"";
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -269,7 +270,7 @@ class Phase13AuditIntegrityComposeIntegrationTest {
 
     private void dropTemporaryTrigger(TemporaryTrigger trigger) throws Exception {
         executePsqlSuccessfully("DROP TRIGGER IF EXISTS " + trigger.triggerName() + " ON public." + trigger.table() + "; "
-                + "DROP FUNCTION IF EXISTS public." + trigger.functionName() + "();");
+                + "DROP FUNCTION IF EXISTS public." + trigger.functionName + "();");
         temporaryTriggers.remove(trigger);
     }
 
@@ -292,8 +293,17 @@ class Phase13AuditIntegrityComposeIntegrationTest {
         Path root = repositoryRoot();
         Process process = new ProcessBuilder(
                 "docker", "compose", "exec", "-T", "postgres",
-                "sh", "-c", command, "phase13-audit-test", sql
+                "sh", "-c", command
         ).directory(root.toFile()).redirectErrorStream(true).start();
+
+        // Write the SQL script to psql's stdin. Passing a multi-statement script
+        // through the command line breaks on Windows because ProcessBuilder and
+        // docker.exe disagree on argument escaping, so psql only receives "CREATE".
+        try (OutputStream stdin = process.getOutputStream()) {
+            stdin.write(sql.getBytes(StandardCharsets.UTF_8));
+            stdin.flush();
+        }
+
         if (!process.waitFor(30, TimeUnit.SECONDS)) {
             process.destroyForcibly();
             throw new AssertionError("Timed out waiting for the Compose PostgreSQL command");
