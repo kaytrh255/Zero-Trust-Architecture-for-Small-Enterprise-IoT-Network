@@ -39,6 +39,21 @@ class MqttMessageSignatureServiceTest {
     }
 
     @Test
+    void fingerprintsEncodedPublicKeyBytesDeterministicallyWithoutExposingKeyMaterial() {
+        DeviceSigningKeyPair keys = service.generateKeyPair();
+        DeviceSigningKeyPair otherKeys = service.generateKeyPair();
+
+        String fingerprint = service.fingerprintPublicKey(keys.publicKey());
+
+        assertThat(fingerprint).matches("[0-9a-f]{64}");
+        assertThat(service.fingerprintPublicKey(keys.publicKey())).isEqualTo(fingerprint);
+        assertThat(service.fingerprintPublicKey(otherKeys.publicKey())).isNotEqualTo(fingerprint);
+        assertThat(fingerprint).doesNotContain(keys.publicKey()).doesNotContain(keys.privateKey());
+        assertThatThrownBy(() -> service.fingerprintPublicKey("***"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void rejectsNonCanonicalBase64UrlAndMalformedSignatures() {
         assertThat(service.generateKeyPair().publicKey()).matches("[A-Za-z0-9_-]{59}");
         assertThat(service.generateKeyPair().privateKey()).matches("[A-Za-z0-9_-]+");

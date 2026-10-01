@@ -54,7 +54,7 @@ export function LoginPage({ onAuthenticated, notice, onDismissNotice }: { onAuth
             <div><span className="feature-icon"><Activity size={17} /></span><span><b>Auditable by design</b><small>Append-only security history</small></span></div>
           </div>
         </div>
-        <div className="login-story-footer"><span>LOCAL CONTROL PLANE</span><span>BUILD 19.0</span></div>
+        <div className="login-story-footer"><span>LOCAL CONTROL PLANE</span><span>BUILD 20.0</span></div>
         <div className="login-orb login-orb-one" /><div className="login-orb login-orb-two" />
       </section>
       <section className="login-form-side">

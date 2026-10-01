@@ -28,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -56,6 +57,9 @@ class DeviceServiceTest {
     @Mock
     private DeviceStatusAuditService deviceStatusAuditService;
 
+    @Mock
+    private DeviceCredentialAuditService deviceCredentialAuditService;
+
     @Test
     void createsABrokerClientAndReturnsItsCredentialsOnce() {
         UserAccount owner = new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true);
@@ -66,15 +70,19 @@ class DeviceServiceTest {
         when(userRepository.findById(7L)).thenReturn(Optional.of(owner));
         when(deviceCredentialService.issueMqttPassword()).thenReturn(mqttPassword);
         when(mqttMessageSignatureService.generateKeyPair()).thenReturn(signingKeyPair);
+        when(mqttMessageSignatureService.fingerprintPublicKey(signingKeyPair.publicKey())).thenReturn("a".repeat(64));
         when(deviceRepository.save(any(Device.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        DeviceProvisioningResponse response = service().create(request(), 7L);
+        DeviceProvisioningResponse response = service().create(request(), 7L, "admin");
 
         assertThat(response.mqttUsername()).isEqualTo("SENSOR-003");
         assertThat(response.mqttPassword()).isEqualTo(mqttPassword);
         assertThat(response.mqttSigningPrivateKey()).isEqualTo(signingKeyPair.privateKey());
         assertThat(response.device().deviceCode()).isEqualTo("SENSOR-003");
         assertThat(response.device().mqttSignatureEnabled()).isTrue();
+        verify(deviceCredentialAuditService).recordProvisioning(
+                any(Device.class), eq("a".repeat(64)), eq(7L), eq("admin")
+        );
         verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", mqttPassword);
         ArgumentCaptor<Device> deviceCaptor = ArgumentCaptor.forClass(Device.class);
         verify(deviceRepository).save(deviceCaptor.capture());
@@ -96,13 +104,17 @@ class DeviceServiceTest {
         when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
         when(deviceCredentialService.issueMqttPassword()).thenReturn("B".repeat(43));
         when(mqttMessageSignatureService.generateKeyPair()).thenReturn(signingKeyPair);
+        when(mqttMessageSignatureService.fingerprintPublicKey(signingKeyPair.publicKey())).thenReturn("b".repeat(64));
 
-        DeviceProvisioningResponse response = service().rotateMqttCredential(3L);
+        DeviceProvisioningResponse response = service().rotateMqttCredential(3L, 7L, "admin");
 
         assertThat(response.mqttUsername()).isEqualTo("SENSOR-003");
         assertThat(response.mqttPassword()).isEqualTo("B".repeat(43));
         assertThat(response.mqttSigningPrivateKey()).isEqualTo("rotated-private-key");
         assertThat(device.getMqttSigningPublicKey()).isEqualTo("rotated-public-key");
+        verify(deviceCredentialAuditService).recordRotation(
+                device, null, "b".repeat(64), 7L, "admin"
+        );
         verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", "B".repeat(43));
     }
 
@@ -307,7 +319,8 @@ class DeviceServiceTest {
                 mqttMessageSignatureService,
                 mqttDynamicSecurityService,
                 deviceOwnershipAuditService,
-                deviceStatusAuditService
+                deviceStatusAuditService,
+                deviceCredentialAuditService
         );
     }
 

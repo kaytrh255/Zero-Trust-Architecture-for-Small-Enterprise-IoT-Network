@@ -46,6 +46,20 @@ export interface Device {
   lastSeenAt: string | null;
 }
 
+export type DeviceCredentialOperation = 'PROVISION' | 'ROTATE';
+
+export interface DeviceCredentialAudit {
+  id: number;
+  deviceId: number;
+  deviceCode: string;
+  operation: DeviceCredentialOperation;
+  previousSigningKeyFingerprint: string | null;
+  newSigningKeyFingerprint: string;
+  changedByUserId: number;
+  changedByUsername: string;
+  changedAt: string;
+}
+
 export interface DeviceProvisioningResponse {
   device: Device;
   mqttUsername: string;

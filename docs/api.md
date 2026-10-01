@@ -75,7 +75,7 @@ All history endpoints return a stable page envelope instead of a bare array. The
 }
 ```
 
-`GET /api/auth/audits`, `GET /api/access/audits`, `GET /api/devices/{id}/ownership-audits`, `GET /api/devices/{id}/status-audits`, and `GET /api/policies/{id}/audits` use this envelope. Their access remains restricted to `ADMIN` and `SECURITY_ANALYST`. Flyway V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history.
+`GET /api/auth/audits`, `GET /api/access/audits`, `GET /api/devices/{id}/ownership-audits`, `GET /api/devices/{id}/status-audits`, `GET /api/devices/{id}/credential-audits`, and `GET /api/policies/{id}/audits` use this envelope. Their access remains restricted to `ADMIN` and `SECURITY_ANALYST`. Flyway V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history; V13 adds append-only device credential lifecycle history.
 
 ## Devices
 
@@ -124,6 +124,26 @@ The backend provisions a Mosquitto Dynamic Security client and generates a per-d
 ### `POST /api/devices/{id}/credentials/rotate` — `ADMIN`
 
 Returns HTTP `200 OK` with `Cache-Control: no-store`, replaces the broker password and Ed25519 key pair, and returns the new username/password/private key once. Both previous credentials become invalid. Use this route to provision legacy or bootstrapped demo devices, rotate keys, or recover a lost credential. The broker account remains enabled regardless of device status so a topic-scoped MQTT publish can reach backend signature/status validation and be audited; a non-`ACTIVE` device's message is denied and not stored.
+
+### `GET /api/devices/{id}/credential-audits` — `ADMIN`, `SECURITY_ANALYST` (Phase 20)
+
+Returns paginated provisioning and signing-key rotation events for the device, newest first. Supports optional `page`, `size`, inclusive `from`/`to`, `operation` (`PROVISION` or `ROTATE`), and `changedByUsername` filters. Each item contains the device ID/code, event operation, previous/new SHA-256 fingerprints of the Ed25519 public key, acting user ID/username, and timestamp. `PROVISION` has no previous fingerprint; rotation records the preceding public-key fingerprint when one existed. Passwords, private keys, and full public-key encodings are not stored or returned in this history. Events are append-only in PostgreSQL. Unknown devices return `404`; other roles receive `403`.
+
+Example response item:
+
+```json
+{
+  "id": 52,
+  "deviceId": 3,
+  "deviceCode": "SENSOR-003",
+  "operation": "ROTATE",
+  "previousSigningKeyFingerprint": "<64 lowercase hex characters>",
+  "newSigningKeyFingerprint": "<64 lowercase hex characters>",
+  "changedByUserId": 1,
+  "changedByUsername": "admin",
+  "changedAt": "2026-10-01T12:00:00Z"
+}
+```
 
 ### `PUT /api/devices/{id}` — `ADMIN`
 
@@ -355,4 +375,4 @@ Validation, authentication, authorization, and application errors use a consiste
 
 Typical status codes: `400` invalid request, `401` missing/invalid authentication or rejected login, `403` insufficient role or a DENY at the protected telemetry route, `404` missing resource, `409` duplicate/immutable identity, `429` login rate limit exceeded (includes `Retry-After`), and `500` unexpected server error. A DENY from `POST /api/access/check` is an HTTP `200` decision body. A protected resource DENY is HTTP `403` with a `ProtectedTelemetryResponse` containing the access decision and an empty telemetry array, not an `ApiError` body.
 
-The Phase 19 web console consumes these existing endpoints; there is no separate aggregate dashboard API. Transparent enforcement on arbitrary IoT resources is not implemented. Phase 11 provides separate audit history for successful device-status transitions and policy mutations; Phase 16 adds a distinct, append-only history for admitted API login attempts; Phase 17 applies a bounded, process-local source-IP limiter, not a distributed production gateway; Phase 18 verifies per-device Ed25519 signatures on MQTT telemetry.
+The Phase 19–20 web console consumes these existing endpoints; there is no separate aggregate dashboard API. Transparent enforcement on arbitrary IoT resources is not implemented. Phase 11 provides separate audit history for successful device-status transitions and policy mutations; Phase 16 adds a distinct, append-only history for admitted API login attempts; Phase 17 applies a bounded, process-local source-IP limiter, not a distributed production gateway; Phase 18 verifies per-device Ed25519 signatures on MQTT telemetry; Phase 20 adds actor-attributed, append-only history for device credential provisioning/rotation without retaining secrets.

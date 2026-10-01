@@ -4,7 +4,7 @@ import {
   Plus, RadioTower, RefreshCw, RotateCw, Search, ShieldCheck, ShieldOff, UserRound,
 } from 'lucide-react';
 import { api, ApiError } from '../lib/api';
-import type { Device, DeviceProvisioningResponse, DeviceStatus, DeviceType, UserProfile } from '../types';
+import type { AuditPage, Device, DeviceCredentialAudit, DeviceProvisioningResponse, DeviceStatus, DeviceType, UserProfile } from '../types';
 import type { Notify } from '../App';
 import { Badge, Button, EmptyState, LoadingState, Modal, PageHeading, Panel, SectionTitle } from '../components/ui';
 
@@ -121,13 +121,13 @@ export function DevicesPage({ token, user, notify }: { token: string; user: User
             <td className="align-right"><div className="row-actions">{canManage && <button className="table-action" onClick={() => setSelectedDevice(device)}><MoreHorizontal size={17} /><span>Manage</span></button>}<button className="row-open" aria-label={`Open ${device.deviceCode}`} onClick={() => setSelectedDevice(device)}><ArrowUpRight size={16} /></button></div></td>
           </tr>)}
         </tbody></table></div> : <EmptyState icon={RadioTower} title={search ? 'No matching devices' : 'No devices provisioned'} detail={search ? 'Try a different device name or identifier.' : 'Provision a device to create a broker identity and signing key.'} action={!search && canManage ? <Button icon={Plus} onClick={() => setCreateOpen(true)}>Provision first device</Button> : undefined} />}
-        <div className="table-footer"><span>{filtered.length} identities shown <i /> Registry is the source of truth</span><span>MQTT IDENTITY / V12</span></div>
+        <div className="table-footer"><span>{filtered.length} identities shown <i /> Registry is the source of truth</span><span>MQTT IDENTITY / V13</span></div>
       </Panel>
 
       <div className="device-security-note"><span className="security-note-icon"><KeyRound size={16} /></span><span><b>Private keys are shown once.</b> The database stores only the signing public key. A rotation invalidates the old broker password and Ed25519 key pair.</span><button onClick={() => notify({ tone: 'info', title: 'Protect one-time secrets', detail: 'Copy credentials into the device secret store. They are never retained by this browser.' })}>Security note <ArrowUpRight size={13} /></button></div>
 
       {createOpen && <CreateDeviceModal onClose={() => setCreateOpen(false)} onCreate={createDevice} />}
-      {selectedDevice && <ManageDeviceModal device={selectedDevice} readOnly={!canManage} onClose={() => setSelectedDevice(null)} onRotate={rotate} onStatus={changeStatus} onTransfer={transfer} onRevoke={revoke} />}
+      {selectedDevice && <ManageDeviceModal token={token} device={selectedDevice} readOnly={!canManage} onClose={() => setSelectedDevice(null)} onRotate={rotate} onStatus={changeStatus} onTransfer={transfer} onRevoke={revoke} />}
       {secrets && <ProvisioningModal response={secrets} onClose={() => setSecrets(null)} />}
     </>
   );
@@ -173,6 +173,7 @@ function CreateDeviceModal({ onClose, onCreate }: { onClose: () => void; onCreat
 }
 
 function ManageDeviceModal({
+  token,
   device,
   readOnly,
   onClose,
@@ -181,6 +182,7 @@ function ManageDeviceModal({
   onTransfer,
   onRevoke,
 }: {
+  token: string;
   device: Device;
   readOnly: boolean;
   onClose: () => void;
@@ -192,6 +194,23 @@ function ManageDeviceModal({
   const [ownerUsername, setOwnerUsername] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [credentialAuditPage, setCredentialAuditPage] = useState<AuditPage<DeviceCredentialAudit> | null>(null);
+  const [credentialAuditPageNumber, setCredentialAuditPageNumber] = useState(0);
+  const [credentialAuditsLoading, setCredentialAuditsLoading] = useState(true);
+  const [credentialAuditsError, setCredentialAuditsError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    setCredentialAuditsLoading(true);
+    setCredentialAuditsError('');
+    api.deviceCredentialAudits(token, device.id, credentialAuditPageNumber, 5)
+      .then((result) => { if (active) setCredentialAuditPage(result); })
+      .catch((cause: unknown) => {
+        if (active) setCredentialAuditsError(cause instanceof Error ? cause.message : 'Could not load credential history.');
+      })
+      .finally(() => { if (active) setCredentialAuditsLoading(false); });
+    return () => { active = false; };
+  }, [token, device.id, credentialAuditPageNumber]);
 
   async function transfer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -206,6 +225,21 @@ function ManageDeviceModal({
     <Modal title={device.deviceName} eyebrow={`DEVICE / ${device.deviceCode}`} description={readOnly ? 'Inspect the registered identity and current enforcement posture.' : 'Review identity posture and perform an administrator action.'} onClose={onClose}>
       <div className="device-detail-summary"><span className="device-detail-mark"><Cpu size={19} /></span><div><b>{device.deviceType} · {device.mqttClientId}</b><small>{device.ipAddress} · Owner {device.ownerUsername ?? 'unassigned'}</small></div><Badge tone={statusTone(device.status)} dot>{device.status}</Badge></div>
       <div className="device-detail-list"><div><span>Signing key</span>{device.mqttSignatureEnabled ? <Badge tone="green" dot>ED25519 ENABLED</Badge> : <Badge tone="amber">ROTATION REQUIRED</Badge>}</div><div><span>Last seen</span><b>{dateTime(device.lastSeenAt)}</b></div><div><span>Provisioned</span><b>{dateTime(device.createdAt)}</b></div></div>
+      <section className="credential-audit-section" aria-label="Device credential history">
+        <div className="credential-audit-heading"><div><b>Credential lifecycle</b><small>Provision and signing-key rotations</small></div><span>{credentialAuditPage?.totalElements ?? '—'} EVENTS</span></div>
+        {credentialAuditsLoading ? <LoadingState label="Loading credential history" /> : credentialAuditsError ? <div className="form-error" role="alert">{credentialAuditsError}</div> : credentialAuditPage?.content.length ? <div className="credential-audit-list">
+          {credentialAuditPage.content.map((audit) => <article className="credential-audit-item" key={audit.id}>
+            <div className="credential-audit-item-top"><Badge tone={audit.operation === 'PROVISION' ? 'blue' : 'violet'}>{audit.operation}</Badge><time>{dateTime(audit.changedAt)}</time></div>
+            <div className="credential-audit-actor">Performed by <b>{audit.changedByUsername}</b></div>
+            <div className="credential-fingerprints">
+              <span><small>PREVIOUS KEY</small><code>{audit.previousSigningKeyFingerprint ? `${audit.previousSigningKeyFingerprint.slice(0, 16)}…` : 'None'}</code></span>
+              <span><small>NEW KEY · SHA-256</small><code>{audit.newSigningKeyFingerprint.slice(0, 16)}…</code></span>
+            </div>
+          </article>)}
+        </div> : <div className="credential-audit-empty">No credential issue or rotation events recorded.</div>}
+        {credentialAuditPage && (credentialAuditPage.hasNext || credentialAuditPage.hasPrevious) && <div className="credential-audit-pagination"><Button size="sm" variant="ghost" disabled={!credentialAuditPage.hasPrevious || credentialAuditsLoading} onClick={() => setCredentialAuditPageNumber((page) => Math.max(0, page - 1))}>Newer</Button><span>Page {credentialAuditPage.page + 1} of {credentialAuditPage.totalPages}</span><Button size="sm" variant="ghost" disabled={!credentialAuditPage.hasNext || credentialAuditsLoading} onClick={() => setCredentialAuditPageNumber((page) => page + 1)}>Older</Button></div>}
+        <div className="credential-audit-note">Only SHA-256 fingerprints are retained; passwords and private keys are never written to history.</div>
+      </section>
       {!readOnly && <div className="manage-actions">
         <div className="manage-action-row"><span className="manage-action-icon"><RotateCw size={16} /></span><span><b>Rotate credentials</b><small>Replaces the password and signing key pair.</small></span><Button size="sm" variant="secondary" onClick={() => { if (window.confirm(`Rotate credentials for ${device.deviceCode}? Existing credentials will stop working immediately.`)) void onRotate(device); }}>Rotate</Button></div>
         <div className="manage-action-row"><span className="manage-action-icon"><ShieldOff size={16} /></span><span><b>{device.status === 'ACTIVE' ? 'Block device' : 'Activate device'}</b><small>{device.status === 'ACTIVE' ? 'Deny telemetry at the backend.' : 'Restore active status checks.'}</small></span><Button size="sm" variant="secondary" disabled={device.status === 'REVOKED'} onClick={() => void onStatus(device, device.status === 'ACTIVE' ? 'BLOCKED' : 'ACTIVE')}>{device.status === 'ACTIVE' ? 'Block' : 'Activate'}</Button></div>

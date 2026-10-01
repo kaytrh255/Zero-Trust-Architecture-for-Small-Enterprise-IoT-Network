@@ -1,4 +1,4 @@
-name: Build and Compose integration (Phase 19)
+name: Build and Compose integration (Phase 20)
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: phase19-ci-${{ github.ref }}
+  group: phase20-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -59,6 +59,7 @@ jobs:
               echo "PHASE13_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
               echo "PHASE14_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
               echo "PHASE16_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
+              echo "PHASE20_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
             fi
           done
           jwt_secret="$(openssl rand -base64 32 | tr -d '\n')"
@@ -133,6 +134,14 @@ jobs:
           PHASE16_BASE_URL: http://127.0.0.1:8080
         run: mvn --batch-mode -Dtest=Phase16AuthenticationAuditComposeIntegrationTest test
 
+      - name: Run Phase 20 device credential lifecycle audit integration test
+        working-directory: backend
+        env:
+          PHASE20_INTEGRATION: 'true'
+          PHASE20_ADMIN_USERNAME: admin
+          PHASE20_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase20DeviceCredentialAuditComposeIntegrationTest test
+
       - name: Reset process-local limiter before Phase 17
         run: docker compose restart backend
 
@@ -184,7 +193,8 @@ jobs:
             target/surefire-reports/com.yak.zerotrust.integration.Phase13AuditIntegrityComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase14DatabaseRolesComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase16AuthenticationAuditComposeIntegrationTest.txt \
-            target/surefire-reports/com.yak.zerotrust.integration.Phase17LoginRateLimitComposeIntegrationTest.txt; do
+            target/surefire-reports/com.yak.zerotrust.integration.Phase17LoginRateLimitComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase20DeviceCredentialAuditComposeIntegrationTest.txt; do
             if [ ! -f "$report" ] || ! grep -Eq 'Failures: [1-9][0-9]*|Errors: [1-9][0-9]*' "$report"; then
               continue
             fi

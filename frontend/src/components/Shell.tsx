@@ -129,7 +129,7 @@ export function Shell({
         <main className="main-content">
           <div className="breadcrumb-mobile"><span>CONTROL PLANE</span><i>/</i>{pageMeta[activeView].crumb.split('/')[1]}</div>
           {children}
-          <footer className="content-footer"><span><span className="footer-shield"><ShieldCheck size={12} /></span> Zero Trust Architecture for Small Enterprise IoT</span><span>PHASE 19 · CONTROL PLANE</span></footer>
+          <footer className="content-footer"><span><span className="footer-shield"><ShieldCheck size={12} /></span> Zero Trust Architecture for Small Enterprise IoT</span><span>PHASE 20 · CONTROL PLANE</span></footer>
         </main>
       </div>
       {notice && (

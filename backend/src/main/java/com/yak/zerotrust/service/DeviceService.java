@@ -2,11 +2,13 @@ package com.yak.zerotrust.service;
 
 import com.yak.zerotrust.dto.AuditPageResponse;
 import com.yak.zerotrust.dto.DeviceOwnershipAuditResponse;
+import com.yak.zerotrust.dto.DeviceCredentialAuditResponse;
 import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.dto.DeviceResponse;
 import com.yak.zerotrust.dto.DeviceStatusAuditResponse;
 import com.yak.zerotrust.entity.Device;
+import com.yak.zerotrust.entity.DeviceCredentialOperation;
 import com.yak.zerotrust.entity.DeviceStatus;
 import com.yak.zerotrust.entity.UserAccount;
 import com.yak.zerotrust.entity.UserRole;
@@ -37,6 +39,7 @@ public class DeviceService {
     private final MqttDynamicSecurityService mqttDynamicSecurityService;
     private final DeviceOwnershipAuditService deviceOwnershipAuditService;
     private final DeviceStatusAuditService deviceStatusAuditService;
+    private final DeviceCredentialAuditService deviceCredentialAuditService;
 
     public DeviceService(
             DeviceRepository deviceRepository,
@@ -45,7 +48,8 @@ public class DeviceService {
             MqttMessageSignatureService mqttMessageSignatureService,
             MqttDynamicSecurityService mqttDynamicSecurityService,
             DeviceOwnershipAuditService deviceOwnershipAuditService,
-            DeviceStatusAuditService deviceStatusAuditService
+            DeviceStatusAuditService deviceStatusAuditService,
+            DeviceCredentialAuditService deviceCredentialAuditService
     ) {
         this.deviceRepository = deviceRepository;
         this.userRepository = userRepository;
@@ -54,6 +58,7 @@ public class DeviceService {
         this.mqttDynamicSecurityService = mqttDynamicSecurityService;
         this.deviceOwnershipAuditService = deviceOwnershipAuditService;
         this.deviceStatusAuditService = deviceStatusAuditService;
+        this.deviceCredentialAuditService = deviceCredentialAuditService;
     }
 
     @Transactional(readOnly = true)
@@ -100,8 +105,24 @@ public class DeviceService {
         );
     }
 
+    @Transactional(readOnly = true)
+    public AuditPageResponse<DeviceCredentialAuditResponse> getCredentialAudits(
+            Long id,
+            int page,
+            int size,
+            Instant from,
+            Instant to,
+            DeviceCredentialOperation operation,
+            String changedByUsername
+    ) {
+        findDevice(id);
+        return deviceCredentialAuditService.searchForDevice(
+                id, page, size, from, to, operation, changedByUsername
+        );
+    }
+
     @Transactional
-    public DeviceProvisioningResponse create(DeviceRequest request, Long ownerId) {
+    public DeviceProvisioningResponse create(DeviceRequest request, Long ownerId, String changedByUsername) {
         String deviceCode = normalizeCode(request.deviceCode());
         String mqttClientId = request.mqttClientId().trim();
         ensureUnique(deviceCode, mqttClientId);
@@ -119,6 +140,12 @@ public class DeviceService {
                 owner,
                 signingKeyPair.publicKey()
         ));
+        deviceCredentialAuditService.recordProvisioning(
+                savedDevice,
+                mqttMessageSignatureService.fingerprintPublicKey(signingKeyPair.publicKey()),
+                ownerId,
+                changedByUsername
+        );
         mqttDynamicSecurityService.provisionDevice(
                 savedDevice.getDeviceCode(),
                 savedDevice.getMqttClientId(),
@@ -128,11 +155,27 @@ public class DeviceService {
     }
 
     @Transactional
-    public DeviceProvisioningResponse rotateMqttCredential(Long id) {
+    public DeviceProvisioningResponse rotateMqttCredential(
+            Long id,
+            Long changedByUserId,
+            String changedByUsername
+    ) {
         Device device = findDevice(id);
         String mqttPassword = deviceCredentialService.issueMqttPassword();
         DeviceSigningKeyPair signingKeyPair = mqttMessageSignatureService.generateKeyPair();
+        String previousPublicKey = device.getMqttSigningPublicKey();
+        String previousFingerprint = previousPublicKey == null
+                ? null
+                : mqttMessageSignatureService.fingerprintPublicKey(previousPublicKey);
+        String newFingerprint = mqttMessageSignatureService.fingerprintPublicKey(signingKeyPair.publicKey());
         device.rotateMqttSigningPublicKey(signingKeyPair.publicKey());
+        deviceCredentialAuditService.recordRotation(
+                device,
+                previousFingerprint,
+                newFingerprint,
+                changedByUserId,
+                changedByUsername
+        );
         mqttDynamicSecurityService.provisionDevice(
                 device.getDeviceCode(),
                 device.getMqttClientId(),

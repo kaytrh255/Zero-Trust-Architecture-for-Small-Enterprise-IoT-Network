@@ -5,6 +5,7 @@ import type {
   AuthenticationAttempt,
   AuthResponse,
   Device,
+  DeviceCredentialAudit,
   DeviceProvisioningResponse,
   DeviceStatus,
   DeviceType,
@@ -104,6 +105,11 @@ export const api = {
   }) => request<DeviceProvisioningResponse>('/api/devices', { token, method: 'POST', body }),
   rotateDevice: (token: string, id: number) =>
     request<DeviceProvisioningResponse>(`/api/devices/${id}/credentials/rotate`, { token, method: 'POST' }),
+  deviceCredentialAudits: (token: string, id: number, page = 0, size = 5) =>
+    request<AuditPage<DeviceCredentialAudit>>(
+      `/api/devices/${id}/credential-audits${queryString({ page, size })}`,
+      { token },
+    ),
   updateDeviceStatus: (token: string, id: number, status: DeviceStatus) =>
     request<Device>(`/api/devices/${id}/status`, { token, method: 'PATCH', body: { status } }),
   transferDevice: (token: string, id: number, ownerUsername: string) =>

@@ -6,9 +6,12 @@ import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.Signature;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.regex.Pattern;
 
 /** Creates per-device Ed25519 keys and verifies signatures over the exact MQTT payload bytes. */
@@ -29,6 +32,19 @@ public class MqttMessageSignatureService {
             );
         } catch (GeneralSecurityException exception) {
             throw new IllegalStateException("Ed25519 key generation is unavailable", exception);
+        }
+    }
+
+    /** Returns a stable SHA-256 fingerprint of the public-key bytes, never private key material. */
+    public String fingerprintPublicKey(String encodedPublicKey) {
+        byte[] publicKeyBytes = decodeCanonicalBase64Url(encodedPublicKey);
+        if (publicKeyBytes == null) {
+            throw new IllegalArgumentException("MQTT signing public key must use canonical unpadded base64url encoding");
+        }
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(publicKeyBytes));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is unavailable", exception);
         }
     }
 

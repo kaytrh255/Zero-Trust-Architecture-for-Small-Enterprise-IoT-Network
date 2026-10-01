@@ -2,12 +2,14 @@ package com.yak.zerotrust.controller;
 
 import com.yak.zerotrust.dto.AuditPageResponse;
 import com.yak.zerotrust.dto.DeviceOwnerRequest;
+import com.yak.zerotrust.dto.DeviceCredentialAuditResponse;
 import com.yak.zerotrust.dto.DeviceOwnershipAuditResponse;
 import com.yak.zerotrust.dto.DeviceProvisioningResponse;
 import com.yak.zerotrust.dto.DeviceRequest;
 import com.yak.zerotrust.dto.DeviceResponse;
 import com.yak.zerotrust.dto.DeviceStatusAuditResponse;
 import com.yak.zerotrust.dto.DeviceStatusRequest;
+import com.yak.zerotrust.entity.DeviceCredentialOperation;
 import com.yak.zerotrust.entity.DeviceStatus;
 import com.yak.zerotrust.security.UserPrincipal;
 import com.yak.zerotrust.service.DeviceService;
@@ -91,6 +93,24 @@ public class DeviceController {
         );
     }
 
+    @GetMapping("/{id}/credential-audits")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SECURITY_ANALYST')")
+    public AuditPageResponse<DeviceCredentialAuditResponse> getCredentialAudits(
+            @PathVariable Long id,
+            @RequestParam(name = "page", defaultValue = "0") int page,
+            @RequestParam(name = "size", defaultValue = "100") int size,
+            @RequestParam(name = "from", required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
+            @RequestParam(name = "to", required = false)
+            @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
+            @RequestParam(name = "operation", required = false) DeviceCredentialOperation operation,
+            @RequestParam(name = "changedByUsername", required = false) String changedByUsername
+    ) {
+        return deviceService.getCredentialAudits(
+                id, page, size, from, to, operation, changedByUsername
+        );
+    }
+
     @PostMapping
     @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<DeviceProvisioningResponse> create(
@@ -99,15 +119,18 @@ public class DeviceController {
     ) {
         return ResponseEntity.status(HttpStatus.CREATED)
                 .cacheControl(CacheControl.noStore())
-                .body(deviceService.create(request, principal.getId()));
+                .body(deviceService.create(request, principal.getId(), principal.getUsername()));
     }
 
     @PostMapping("/{id}/credentials/rotate")
     @PreAuthorize("hasRole('ADMIN')")
-    public ResponseEntity<DeviceProvisioningResponse> rotateMqttCredential(@PathVariable Long id) {
+    public ResponseEntity<DeviceProvisioningResponse> rotateMqttCredential(
+            @PathVariable Long id,
+            @AuthenticationPrincipal UserPrincipal principal
+    ) {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
-                .body(deviceService.rotateMqttCredential(id));
+                .body(deviceService.rotateMqttCredential(id, principal.getId(), principal.getUsername()));
     }
 
     @PutMapping("/{id}")
