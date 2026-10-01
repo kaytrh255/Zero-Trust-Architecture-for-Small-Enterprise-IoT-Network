@@ -166,4 +166,10 @@ jobs:
 
       - name: Stop stack and remove ephemeral volumes
         if: always()
-        run: docker compose down --volumes --remove-orphans
+        shell: bash
+        run: |
+          if [ -f .env ]; then
+            docker compose down --volumes --remove-orphans
+          else
+            echo 'No Compose environment was created; skipping cleanup.'
+          fi

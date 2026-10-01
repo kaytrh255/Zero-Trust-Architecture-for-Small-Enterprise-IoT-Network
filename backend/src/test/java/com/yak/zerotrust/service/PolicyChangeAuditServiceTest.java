@@ -12,12 +12,14 @@ import com.yak.zerotrust.repository.PolicyChangeAuditRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 
 import java.lang.reflect.Field;
 import java.util.List;
@@ -69,7 +71,10 @@ class PolicyChangeAuditServiceTest {
         Pageable pageable = PageRequest.of(0, 100, Sort.by(
                 Sort.Order.desc("changedAt"), Sort.Order.desc("id")
         ));
-        when(auditRepository.findAll(any(), any(Pageable.class)))
+        when(auditRepository.findAll(
+                ArgumentMatchers.<Specification<PolicyChangeAudit>>any(),
+                any(Pageable.class)
+        ))
                 .thenReturn(new PageImpl<>(List.of(saved), pageable, 1));
 
         AuditPageResponse<PolicyChangeAuditResponse> response = service.searchForPolicy(
