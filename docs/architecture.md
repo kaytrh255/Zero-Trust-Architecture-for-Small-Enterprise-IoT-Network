@@ -2,16 +2,17 @@
 
 ## Architectural style
 
-The project is a modular monolith: one Spring Boot application owns REST APIs, authentication, device and policy management, access decisions, audits, and MQTT telemetry ingestion. PostgreSQL is the application database. Docker Compose runs PostgreSQL, a local Mosquitto broker, and the backend.
+The project is a modular monolith: one Spring Boot application owns REST APIs, authentication, device and policy management, access decisions, audits, and MQTT telemetry ingestion. PostgreSQL is the application database. Docker Compose runs PostgreSQL, a local Mosquitto broker, the backend, and a separate static React/TypeScript console served by Nginx.
 
 ## Local deployment
 
 ```text
-curl / Postman                         Simulated IoT publisher
+Browser (React SPA)                        Simulated IoT publisher
       |                                           |
-      | HTTP + bearer JWT                         | MQTT/TLS + device credentials + Ed25519 signature
+      | same-origin /api + bearer JWT              | MQTT/TLS + device credentials + Ed25519 signature
       v                                           v
-Spring Boot application <====== verified TLS ======> Mosquitto :8883
+Nginx :3000 -> Spring Boot API <====== verified TLS ======> Mosquitto :8883
+(curl / Postman may also call API :8080 directly)
   ├── AuthController / AuthService                 ├── Dynamic Security plugin
   ├── AuthenticationAuditService
   ├── JwtAuthenticationFilter                     ├── per-device literal publish ACL
@@ -32,10 +33,16 @@ PostgreSQL (Docker volume)
   └── administrator: role bootstrap only
 
 Compose startup dependency chain:
-postgres healthy -> db-roles-init -> db-migrate (Flyway CLI) -> backend
+postgres healthy -> db-roles-init -> db-migrate (Flyway CLI) -> backend -> frontend (Nginx SPA)
 ```
 
 The broker exposes no plaintext MQTT listener. Compose generates a local CA and a broker certificate with `mosquitto`, `localhost`, and `127.0.0.1` SAN entries. Backend MQTT clients trust that CA and enable hostname verification. These generated development certificates are ignored by Git. The separate migration container receives `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; those values are not present in the backend container environment. The database bootstrap also transfers ownership on existing volumes in place; it does not require deleting application data.
+
+## Web console (Phase 19)
+
+The frontend is a React/TypeScript single-page application with role-aware views for `ADMIN`, `SECURITY_ANALYST`, and `USER`. It consumes existing REST endpoints rather than introducing an aggregate dashboard API. Compose builds the static assets and serves them through Nginx on loopback port 3000; Nginx proxies same-origin `/api` and `/actuator` paths to Spring Boot. Local Vite development uses the same relative browser URLs with a server-side proxy to `VITE_PROXY_TARGET` (default `http://127.0.0.1:8080`). No browser CORS policy or browser-to-localhost request is required.
+
+The bearer token stays in in-memory React state, so reload or sign-out requires a fresh login; it is not stored in Web Storage. One-time device credentials are shown in a temporary provisioning dialog and cleared when the dialog closes. UI role checks improve usability only; server authorization remains the security boundary.
 
 ## Authentication request path
 

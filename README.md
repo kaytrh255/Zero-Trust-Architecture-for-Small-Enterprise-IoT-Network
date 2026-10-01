@@ -23,8 +23,9 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 16:** audit successful and rejected API logins in a separate append-only history; only admins and security analysts can search the paged records, which never contain passwords or JWTs.
 - **Phase 17:** throttle login attempts per socket peer address with a bounded in-memory fixed window; excess requests receive HTTP `429` and `Retry-After`, without trusting forwarded-IP headers.
 - **Phase 18:** sign MQTT telemetry with a per-device Ed25519 key; the backend verifies signatures before policy/replay evaluation and auditing.
+- **Phase 19:** a responsive React/TypeScript control plane for device provisioning, policy management, access/login history, telemetry, and the USER-owned protected telemetry route.
 
-The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. The web frontend is planned next (Phase 19); there is no physical-device deployment.
+The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. The web console is a role-aware client for the existing APIs; server-side authorization remains authoritative. There is no physical-device deployment.
 
 ## Requirements
 
@@ -32,7 +33,8 @@ The protected route and MQTT subscriber enforce decisions on the prototype's sim
 - Docker Compose v2 (`docker compose`)
 - `curl` (PowerShell users can use `curl.exe`)
 - `mosquitto_pub` for host-side MQTT checks (install the Mosquitto client package)
-- Optional for unit tests directly: Java 21 and Maven 3.9+
+- Optional for direct backend tests: Java 21 and Maven 3.9+
+- Optional for frontend development outside Compose: Node.js 22 and npm
 
 ## Run with Docker Compose
 
@@ -57,7 +59,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Compose runs PostgreSQL, an idempotent `db-roles-init` step, a separate one-shot Flyway `db-migrate` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. `db-roles-init`, `db-migrate`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. The separate `db-migrate` Flyway CLI service uses `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; the backend receives only `DB_USERNAME` / `DB_PASSWORD` for runtime DML and does not receive migration credentials. Flyway creates/updates users, devices, policies, authentication/access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history; V12 adds the nullable per-device MQTT signing public key. The generated CA, broker certificate, and TLS private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
+Compose runs PostgreSQL, an idempotent `db-roles-init` step, a separate one-shot Flyway `db-migrate` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, the backend API, and a static React frontend served by Nginx. `db-roles-init`, `db-migrate`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. The separate `db-migrate` Flyway CLI service uses `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; the backend receives only `DB_USERNAME` / `DB_PASSWORD` for runtime DML and does not receive migration credentials. Flyway creates/updates users, devices, policies, authentication/access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history; V12 adds the nullable per-device MQTT signing public key. The generated CA, broker certificate, and TLS private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
 
 Check the backend and database:
 
@@ -65,7 +67,23 @@ Check the backend and database:
 curl -i http://localhost:8080/actuator/health
 ```
 
-A successful response has HTTP `200`, overall `"status":"UP"`, and a database component such as `"db":{"status":"UP"}`.
+A successful response has HTTP `200`, overall `"status":"UP"`, and a database component such as `"db":{"status":"UP"}`. The web console is available at `http://localhost:3000` (or `http://localhost:${FRONTEND_PORT}` if configured); API traffic uses the same-origin Nginx proxy. The frontend, backend, and broker ports are bound to loopback by default.
+
+## Web console (Phase 19)
+
+Open `http://localhost:3000` and sign in with the bootstrap administrator or a registered account. `ADMIN` can provision devices, rotate one-time MQTT/signing credentials, change status/ownership, and manage policies. `SECURITY_ANALYST` can review device posture, policies, telemetry, and audit history. A `USER` gets only the protected telemetry reader; the backend checks policy and device ownership before returning samples. User registration always creates a `USER` account, never an administrator.
+
+The console calls the existing REST API through a same-origin proxy, so CORS is not enabled. JWTs are kept in React memory only (not local/session storage) and are cleared on sign-out or tab reload. Device MQTT passwords and Ed25519 private keys appear only in the one-time provisioning/rotation dialog; copy them into the device secret store before closing it. Role-based navigation is only a usability layer—the backend remains the authorization boundary.
+
+For frontend development outside Compose, start the API stack, then run:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Vite listens on `0.0.0.0:5173` and proxies relative `/api` and `/actuator` requests to `http://127.0.0.1:8080` by default. Set `VITE_PROXY_TARGET` to change the server-side proxy target; browser code never calls localhost directly.
 
 ## Obtain tokens
 
@@ -427,7 +445,13 @@ New API-provisioned devices receive an Ed25519 key pair. The database stores onl
 
 The MQTT body is an envelope with unpadded-base64url `payload` and `signature` fields. The decoded `payload` is the exact UTF-8 telemetry JSON byte sequence, and the signature is Ed25519 over those exact bytes. The backend locks the device, verifies the signature against the key bound to the topic's device identity, then parses the payload and applies status, policy, and replay checks. A bad signature is audited as `DENY` / `INVALID_DEVICE_CREDENTIAL`, with no untrusted sequence; it cannot consume the high-water mark or persist telemetry. The signed payload remains capped at 2048 bytes and the full envelope at 4096 bytes.
 
-`Phase10ComposeIntegrationTest` now exercises a valid signed publish and modifies signed telemetry bytes to verify rejection. Ordinary unit tests run with `cd backend && mvn test`; Phase 10 (including Phase 18), 11, 13, 14, 16, and 17 Compose integration classes are opt-in via `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, `PHASE16_INTEGRATION`, and `PHASE17_INTEGRATION`. GitHub Actions runs the complete suite against an ephemeral Compose stack. The next planned phase is the web frontend (Phase 19).
+`Phase10ComposeIntegrationTest` exercises a valid signed publish and modifies signed telemetry bytes to verify rejection. Ordinary backend unit tests run with `cd backend && mvn test`; Phase 10 (including Phase 18), 11, 13, 14, 16, and 17 Compose integration classes are opt-in via `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, `PHASE16_INTEGRATION`, and `PHASE17_INTEGRATION`. GitHub Actions runs the complete suite against an ephemeral Compose stack and builds the frontend. See Phase 19 below for the console.
+
+## Phase 19: role-aware web control plane
+
+The React/TypeScript console is served at `http://localhost:3000` by the Compose `frontend` service. It includes a live overview, device identity inventory/provisioning/rotation/status/owner controls, exact-match policy CRUD, access-decision and authentication-attempt ledgers, recent accepted telemetry, and a USER-facing protected telemetry reader. The UI reflects `ADMIN`, `SECURITY_ANALYST`, and `USER` capabilities, while every operation is still checked by Spring Security and the backend service layer.
+
+The browser uses relative `/api` and `/actuator` paths through the same-origin Nginx proxy; no CORS allowlist is needed. Access tokens remain in memory and are not stored in `localStorage` or `sessionStorage`. Provisioning secrets remain only in component memory until the one-time secret dialog is closed. Run `npm ci && npm run build` in `frontend` to check the standalone web build; `npm run dev` starts Vite on port `5173` and proxies API traffic to `http://127.0.0.1:8080` (override with `VITE_PROXY_TARGET`).
 
 ## Security locations and limitations
 
@@ -441,7 +465,7 @@ The MQTT body is an envelope with unpadded-base64url `payload` and `signature` f
 - Device status transitions and policy CREATE/UPDATE/DELETE audits share the transaction with the mutation. No-op status changes and rejected management requests create no change event; failed login attempts are recorded separately. Policy DELETE history remains available by policy ID after the live policy row is removed.
 - No role can override an explicit `DENY`; missing policies default to `DENY`.
 
-This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT now uses per-device broker credentials/ACLs, TLS, Ed25519-signed application payloads, and replay sequence checking. The web frontend is next (Phase 19); credential expiry, automated CA rotation, MFA, hardware-backed key storage, and production secret management are not implemented. Login throttling is process-local and is not a distributed production rate limiter.
+This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, Ed25519-signed application payloads, and replay sequence checking. The Phase 19 console is a client for these existing APIs, not a separate enforcement gateway. Credential expiry, automated CA rotation, MFA, hardware-backed key storage, production secret management, and a distributed production rate limiter are not implemented.
 
 ## Useful commands
 

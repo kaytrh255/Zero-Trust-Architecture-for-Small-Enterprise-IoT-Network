@@ -7,6 +7,12 @@
 **/target/
 *.class
 
+# Frontend dependencies and build output
+**/node_modules/
+/frontend/dist/
+/frontend/.env
+/frontend/.env.*
+
 # IDEs and operating systems
 .idea/
 .vscode/
