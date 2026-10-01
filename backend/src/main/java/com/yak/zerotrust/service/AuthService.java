@@ -13,6 +13,7 @@ import com.yak.zerotrust.security.UserPrincipal;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,17 +27,20 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final AuthenticationManager authenticationManager;
     private final JwtService jwtService;
+    private final AuthenticationAuditService authenticationAuditService;
 
     public AuthService(
             UserRepository userRepository,
             PasswordEncoder passwordEncoder,
             AuthenticationManager authenticationManager,
-            JwtService jwtService
+            JwtService jwtService,
+            AuthenticationAuditService authenticationAuditService
     ) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.authenticationManager = authenticationManager;
         this.jwtService = jwtService;
+        this.authenticationAuditService = authenticationAuditService;
     }
 
     @Transactional
@@ -57,15 +61,20 @@ public class AuthService {
     }
 
     public AuthResponse login(LoginRequest request) {
-        Authentication authentication = authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(
-                        normalizeUsername(request.username()),
-                        request.password()
-                )
-        );
+        String username = normalizeUsername(request.username());
+        Authentication authentication;
+        try {
+            authentication = authenticationManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(username, request.password())
+            );
+        } catch (AuthenticationException exception) {
+            authenticationAuditService.recordFailedLogin(username);
+            throw exception;
+        }
 
         UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
         String token = jwtService.generateToken(principal.getUsername());
+        authenticationAuditService.recordSuccessfulLogin(principal);
         return new AuthResponse(
                 token,
                 "Bearer",

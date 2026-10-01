@@ -37,11 +37,27 @@ Request:
 }
 ```
 
-Successful response: HTTP `200 OK` with `accessToken`, `tokenType` (`Bearer`), `expiresInSeconds`, and a safe user profile. Wrong credentials return `401 Unauthorized` with a generic message.
+Successful response: HTTP `200 OK` with `accessToken`, `tokenType` (`Bearer`), `expiresInSeconds`, and a safe user profile. Wrong credentials return `401 Unauthorized` with a generic message. Each validated login request is recorded separately in authentication-attempt history; the audit stores no password or token.
 
 ### `GET /api/auth/me` — authenticated
 
 Send the token from login in the `Authorization` header. Returns the current user's safe profile. Missing, malformed, invalid, or expired tokens return `401 Unauthorized`.
+
+### `GET /api/auth/audits` — `ADMIN`, `SECURITY_ANALYST` (Phase 16)
+
+Searches validated login attempts with the common page envelope. Optional filters are `page`, `size`, inclusive `from` / `to`, `username` (case-insensitive), and `outcome` (`SUCCESS` or `FAILURE`). Failed attempts use the same generic `401` response for unknown users and incorrect passwords; their audit rows have no authenticated user ID. Successful rows include the authenticated user's ID. Passwords, JWTs, and client IP addresses are never stored or returned. `USER` callers receive `403 Forbidden`.
+
+Example response item:
+
+```json
+{
+  "id": 42,
+  "attemptedUsername": "student1",
+  "authenticatedUserId": 7,
+  "outcome": "SUCCESS",
+  "attemptedAt": "2026-10-01T12:00:00Z"
+}
+```
 
 ## Audit history pagination and filters (Phase 12)
 
@@ -59,7 +75,7 @@ All history endpoints return a stable page envelope instead of a bare array. The
 }
 ```
 
-`GET /api/access/audits`, `GET /api/devices/{id}/ownership-audits`, `GET /api/devices/{id}/status-audits`, and `GET /api/policies/{id}/audits` use this envelope. Their access remains restricted to `ADMIN` and `SECURITY_ANALYST`. Flyway V10 makes persisted audit rows append-only by rejecting database UPDATE/DELETE operations.
+`GET /api/auth/audits`, `GET /api/access/audits`, `GET /api/devices/{id}/ownership-audits`, `GET /api/devices/{id}/status-audits`, and `GET /api/policies/{id}/audits` use this envelope. Their access remains restricted to `ADMIN` and `SECURITY_ANALYST`. Flyway V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history.
 
 ## Devices
 
@@ -324,4 +340,4 @@ Validation, authentication, authorization, and application errors use a consiste
 
 Typical status codes: `400` invalid request, `401` missing/invalid authentication, `403` insufficient role or a DENY at the protected telemetry route, `404` missing resource, `409` duplicate/immutable identity, and `500` unexpected server error. A DENY from `POST /api/access/check` is an HTTP `200` decision body. A protected resource DENY is HTTP `403` with a `ProtectedTelemetryResponse` containing the access decision and an empty telemetry array, not an `ApiError` body.
 
-API authentication-attempt audits, dashboard endpoints, application-level MQTT message signatures, and transparent enforcement on arbitrary IoT resources are not implemented. Phase 11 provides separate audit history for successful device-status transitions and policy mutations.
+Dashboard endpoints, application-level MQTT message signatures, and transparent enforcement on arbitrary IoT resources are not implemented. Phase 11 provides separate audit history for successful device-status transitions and policy mutations; Phase 16 adds a distinct, append-only history for validated API login attempts.

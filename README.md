@@ -17,9 +17,10 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 10:** successful ADMIN ownership transfers are recorded with old/new owner snapshots, actor identity, device, and timestamp; authorized device managers can read each device's transfer history.
 - **Phase 11:** actual device-status transitions and policy CREATE/UPDATE/DELETE operations write typed management-audit records with authenticated actor, timestamp, and before/after snapshots in the same transaction; admins/security analysts can read the latest history, including policy history after deletion.
 - **Phase 12:** all audit-history APIs support a consistent page envelope, stable newest-first ordering, inclusive timestamp ranges, and event-specific filters; page size is capped at 100 and existing role protections remain in force.
-- **Phase 13:** Flyway makes all four audit histories append-only; opt-in Compose checks inject database failures to verify mutation/audit rollback and exercise timestamp-tie pagination.
+- **Phase 13:** Flyway makes the four then-existing business audit histories append-only; opt-in Compose checks inject database failures to verify mutation/audit rollback and exercise timestamp-tie pagination.
 - **Phase 14:** separate PostgreSQL runtime and Flyway migration roles; idempotent startup bootstrapping transfers existing object ownership without discarding volumes, while Compose checks prove runtime DML still works and runtime DDL/trigger changes are denied.
 - **Phase 15:** run Flyway in its own one-shot Compose service so migration credentials are not injected into the backend container; the backend starts only after migrations complete.
+- **Phase 16:** audit successful and rejected API logins in a separate append-only history; only admins and security analysts can search the paged records, which never contain passwords or JWTs.
 
 The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
 
@@ -54,7 +55,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Compose runs PostgreSQL, an idempotent `db-roles-init` step, a separate one-shot Flyway `db-migrate` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. `db-roles-init`, `db-migrate`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. The separate `db-migrate` Flyway CLI service uses `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; the backend receives only `DB_USERNAME` / `DB_PASSWORD` for runtime DML and does not receive migration credentials. Flyway creates/updates users, devices, policies, access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 prevents UPDATE/DELETE of rows in all four audit-history tables. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
+Compose runs PostgreSQL, an idempotent `db-roles-init` step, a separate one-shot Flyway `db-migrate` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. `db-roles-init`, `db-migrate`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. The separate `db-migrate` Flyway CLI service uses `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; the backend receives only `DB_USERNAME` / `DB_PASSWORD` for runtime DML and does not receive migration credentials. Flyway creates/updates users, devices, policies, authentication/access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
 
 Check the backend and database:
 
@@ -356,7 +357,26 @@ Flyway now runs in the one-shot `db-migrate` service using the standalone Flyway
 docker compose exec backend sh -c 'test -z "${DB_MIGRATION_USERNAME+x}" && test -z "${DB_MIGRATION_PASSWORD+x}"'
 ```
 
-The Phase 14 Compose integration test checks this separation in CI, along with migration ownership, runtime DML, and the existing-volume upgrade. Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, and 14 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, and `PHASE14_INTEGRATION` environment variables. GitHub Actions runs the complete suite against an ephemeral Compose stack.
+The Phase 14 Compose integration test checks this separation in CI, along with migration ownership, runtime DML, and the existing-volume upgrade.
+
+## Phase 16: audit API login attempts
+
+Each login request that passes request validation records a normalized attempted username, `SUCCESS` or `FAILURE`, a timestamp, and the authenticated user ID only on success. Passwords, bearer tokens, and client IP addresses are not stored. The `authentication_attempt_audits` table is append-only. Admins and security analysts can search it at `GET /api/auth/audits` using the common page/date filters plus optional `username` and `outcome` filters; ordinary users cannot read it.
+
+Run the opt-in integration check after `docker compose up --build -d` has completed successfully. It verifies success/failure records, generic 401 behavior, role protection, secret minimization, and database-level append-only enforcement. Use a disposable stack: the check leaves its generated test account and append-only events in the database.
+
+```bash
+set -a
+. ./.env
+set +a
+export PHASE16_INTEGRATION=true
+export PHASE16_ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+export PHASE16_ADMIN_PASSWORD="$ADMIN_PASSWORD"
+export PHASE16_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
+(cd backend && mvn -Dtest=Phase16AuthenticationAuditComposeIntegrationTest test)
+```
+
+Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, 14, and 16 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, and `PHASE16_INTEGRATION` environment variables. GitHub Actions runs the complete suite against an ephemeral Compose stack.
 
 ## Security locations and limitations
 
@@ -366,11 +386,11 @@ The Phase 14 Compose integration test checks this separation in CI, along with m
 - `MqttDynamicSecurityService` uses verified TLS and the dedicated Dynamic Security administrator to provision/rotate device credentials. Broker accounts stay enabled across device-status changes so the backend can audit `DEVICE_NOT_ACTIVE` denials.
 - Mosquitto Dynamic Security assigns each device a unique role with one literal publish ACL for `iot/telemetry/{deviceCode}`; the backend subscriber uses a distinct least-privilege account.
 - `TelemetryIngestionService` validates payload shape and sequence, then applies the same active-status/policy decision. Accepted sequence advancement and telemetry persistence are atomic; repeated/lower sequences are audited and not stored.
-- `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService`, `DeviceStatusAuditService`, and `PolicyChangeAuditService` persist their respective management histories separately. Access-decision, ownership, status-change, policy-change, and telemetry history reads are restricted to `ADMIN` and `SECURITY_ANALYST`.
-- Device status transitions and policy CREATE/UPDATE/DELETE audits share the transaction with the mutation. No-op status changes and rejected requests create no event; policy DELETE history remains available by policy ID after the live policy row is removed.
+- `AuthenticationAuditService` records validated login success/failure events without credential material; `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService`, `DeviceStatusAuditService`, and `PolicyChangeAuditService` persist their respective management histories separately. Authentication, access-decision, ownership, status-change, policy-change, and telemetry history reads are restricted to `ADMIN` and `SECURITY_ANALYST`.
+- Device status transitions and policy CREATE/UPDATE/DELETE audits share the transaction with the mutation. No-op status changes and rejected management requests create no change event; failed login attempts are recorded separately. Policy DELETE history remains available by policy ID after the live policy row is removed.
 - No role can override an explicit `DENY`; missing policies default to `DENY`.
 
-This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, and replay sequence checking, but no signed application payloads, credential expiry, automated CA rotation, MFA, API-authentication auditing, rate limiting, or production secret management.
+This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, and replay sequence checking, but no signed application payloads, credential expiry, automated CA rotation, MFA, rate limiting, or production secret management.
 
 ## Useful commands
 

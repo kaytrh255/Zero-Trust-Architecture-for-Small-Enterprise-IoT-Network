@@ -1,4 +1,4 @@
-name: Build and Compose integration (Phase 14)
+name: Build and Compose integration (Phase 16)
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: phase14-ci-${{ github.ref }}
+  group: phase16-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -47,6 +47,7 @@ jobs:
               echo "PHASE11_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
               echo "PHASE13_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
               echo "PHASE14_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
+              echo "PHASE16_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
             fi
           done
           jwt_secret="$(openssl rand -base64 32 | tr -d '\n')"
@@ -106,6 +107,14 @@ jobs:
           PHASE14_BASE_URL: http://127.0.0.1:8080
         run: mvn --batch-mode -Dtest=Phase14DatabaseRolesComposeIntegrationTest test
 
+      - name: Run Phase 16 authentication-audit integration test
+        working-directory: backend
+        env:
+          PHASE16_INTEGRATION: 'true'
+          PHASE16_ADMIN_USERNAME: admin
+          PHASE16_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase16AuthenticationAuditComposeIntegrationTest test
+
       - name: Add Maven test reports to the job summary
         if: always()
         shell: bash
@@ -131,7 +140,8 @@ jobs:
             target/surefire-reports/com.yak.zerotrust.integration.Phase10ComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase11ComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase13AuditIntegrityComposeIntegrationTest.txt \
-            target/surefire-reports/com.yak.zerotrust.integration.Phase14DatabaseRolesComposeIntegrationTest.txt; do
+            target/surefire-reports/com.yak.zerotrust.integration.Phase14DatabaseRolesComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase16AuthenticationAuditComposeIntegrationTest.txt; do
             if [ ! -f "$report" ] || ! grep -Eq 'Failures: [1-9][0-9]*|Errors: [1-9][0-9]*' "$report"; then
               continue
             fi
