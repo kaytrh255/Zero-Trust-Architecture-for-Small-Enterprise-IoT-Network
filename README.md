@@ -19,6 +19,7 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 12:** all audit-history APIs support a consistent page envelope, stable newest-first ordering, inclusive timestamp ranges, and event-specific filters; page size is capped at 100 and existing role protections remain in force.
 - **Phase 13:** Flyway makes all four audit histories append-only; opt-in Compose checks inject database failures to verify mutation/audit rollback and exercise timestamp-tie pagination.
 - **Phase 14:** separate PostgreSQL runtime and Flyway migration roles; idempotent startup bootstrapping transfers existing object ownership without discarding volumes, while Compose checks prove runtime DML still works and runtime DDL/trigger changes are denied.
+- **Phase 15:** run Flyway in its own one-shot Compose service so migration credentials are not injected into the backend container; the backend starts only after migrations complete.
 
 The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
 
@@ -53,7 +54,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Compose runs PostgreSQL, an idempotent `db-roles-init` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. `db-roles-init`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. Spring's application datasource uses `DB_USERNAME` / `DB_PASSWORD` for runtime DML; Flyway uses the separate `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD` connection for migrations. Flyway creates/updates users, devices, policies, access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 prevents UPDATE/DELETE of rows in all four audit-history tables. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
+Compose runs PostgreSQL, an idempotent `db-roles-init` step, a separate one-shot Flyway `db-migrate` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. `db-roles-init`, `db-migrate`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. The separate `db-migrate` Flyway CLI service uses `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; the backend receives only `DB_USERNAME` / `DB_PASSWORD` for runtime DML and does not receive migration credentials. Flyway creates/updates users, devices, policies, access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 prevents UPDATE/DELETE of rows in all four audit-history tables. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
 
 Check the backend and database:
 
@@ -332,7 +333,7 @@ Expected checks: a status change, owner transfer, policy create, or policy updat
 
 ## Phase 14: verify database-role separation and existing-volume upgrade
 
-The Phase 14 integration test targets the running Compose stack and is opt-in. It checks that the runtime role is not privileged or an owner, that the migration role owns Flyway-managed objects and can run DDL, that application policy CRUD still succeeds using the runtime datasource, and that runtime connections cannot create/alter tables or disable/drop the append-only triggers. To cover existing volumes, the test creates a fixture table owned by the old runtime role, reruns `db-roles-init`, and verifies ownership and runtime DML/sequence access are migrated in place. The fixture table is removed during cleanup; policy audit history is append-only and remains. Use a disposable/demo stack, not production data. The upgrade does not require deleting `postgres_data`.
+The Phase 14 integration test targets the running Compose stack and is opt-in. It checks that the backend container does not receive migration credentials, the runtime role is not privileged or an owner, the separate migration role owns Flyway-managed objects and can run DDL, application policy CRUD still succeeds using the runtime datasource, and runtime connections cannot create/alter tables or disable/drop the append-only triggers. To cover existing volumes, the test creates a fixture table owned by the old runtime role, reruns `db-roles-init`, and verifies ownership and runtime DML/sequence access are migrated in place. The fixture table is removed during cleanup; policy audit history is append-only and remains. Use a disposable/demo stack, not production data. The upgrade does not require deleting `postgres_data`.
 
 ```bash
 set -a
@@ -345,9 +346,17 @@ export PHASE14_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
 (cd backend && mvn -Dtest=Phase14DatabaseRolesComposeIntegrationTest test)
 ```
 
-Run the test only after `docker compose up --build -d` has completed successfully, so PostgreSQL role bootstrap, Flyway migrations, and the backend are ready. It also needs the Docker Compose CLI to invoke `psql` and rerun the one-shot role bootstrap inside the existing stack. The bootstrap service is idempotent and also runs automatically before the backend on subsequent starts.
+Run the test only after `docker compose up --build -d` has completed successfully, so PostgreSQL role bootstrap, Flyway migrations, and the backend are ready. It also needs the Docker Compose CLI to invoke `psql` and rerun the one-shot role bootstrap inside the existing stack. The bootstrap service is idempotent and also runs automatically before migrations on subsequent stack recreations.
 
-Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, and 14 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, and `PHASE14_INTEGRATION` environment variables. GitHub Actions runs the complete suite against an ephemeral Compose stack.
+## Phase 15: keep migration credentials out of the backend
+
+Flyway now runs in the one-shot `db-migrate` service using the standalone Flyway CLI image and read-only migration SQL mount. Compose orders startup as PostgreSQL health, role bootstrap, migration, then backend. The backend only receives its DML-only `DB_USERNAME` / `DB_PASSWORD`; it has no `DB_MIGRATION_USERNAME` or `DB_MIGRATION_PASSWORD` environment variables. Verify locally with:
+
+```bash
+docker compose exec backend sh -c 'test -z "${DB_MIGRATION_USERNAME+x}" && test -z "${DB_MIGRATION_PASSWORD+x}"'
+```
+
+The Phase 14 Compose integration test checks this separation in CI, along with migration ownership, runtime DML, and the existing-volume upgrade. Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, and 14 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, and `PHASE14_INTEGRATION` environment variables. GitHub Actions runs the complete suite against an ephemeral Compose stack.
 
 ## Security locations and limitations
 

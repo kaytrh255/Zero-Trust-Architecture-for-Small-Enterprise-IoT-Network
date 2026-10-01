@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Verifies least-privilege PostgreSQL roles and the existing-volume ownership upgrade. */
+/** Verifies migration-credential isolation, least-privilege PostgreSQL roles, and the existing-volume ownership upgrade. */
 @EnabledIfEnvironmentVariable(named = "PHASE14_INTEGRATION", matches = "true")
 class Phase14DatabaseRolesComposeIntegrationTest {
 
@@ -62,6 +62,7 @@ class Phase14DatabaseRolesComposeIntegrationTest {
         String testPolicyName = "Phase 14 runtime DML " + suffix;
 
         try {
+            assertBackendDoesNotReceiveMigrationCredentials();
             assertRuntimeRoleIsUnprivileged();
             assertMigrationRoleOwnsApplicationObjects();
             assertAppendOnlyTriggersAreOwnedAndEnabled();
@@ -102,6 +103,15 @@ class Phase14DatabaseRolesComposeIntegrationTest {
                 }
             }
         }
+    }
+
+    private void assertBackendDoesNotReceiveMigrationCredentials() throws Exception {
+        String command = "test -z \"${DB_MIGRATION_USERNAME+x}\" "
+                + "&& test -z \"${DB_MIGRATION_PASSWORD+x}\"";
+        CommandResult result = runCompose("exec", "-T", "backend", "sh", "-c", command);
+        assertThat(result.exitCode())
+                .as("backend container must not receive Flyway migration credentials; output: %s", result.output())
+                .isZero();
     }
 
     private void assertRuntimeRoleIsUnprivileged() throws Exception {

@@ -39,6 +39,24 @@ services:
       - ./postgres/scripts/bootstrap-db-roles.sh:/scripts/bootstrap-db-roles.sh:ro
     entrypoint: ["/bin/sh", "/scripts/bootstrap-db-roles.sh"]
 
+  db-migrate:
+    image: flyway/flyway:13.8.1-alpine
+    restart: "no"
+    depends_on:
+      db-roles-init:
+        condition: service_completed_successfully
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-zerotrust}
+      FLYWAY_USER: ${DB_MIGRATION_USERNAME:?Set DB_MIGRATION_USERNAME in .env}
+      FLYWAY_PASSWORD: ${DB_MIGRATION_PASSWORD:?Set DB_MIGRATION_PASSWORD in .env}
+      FLYWAY_SCHEMAS: public
+      FLYWAY_DEFAULT_SCHEMA: public
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_CONNECT_RETRIES: 20
+    volumes:
+      - ./backend/src/main/resources/db/migration:/flyway/sql:ro
+    command: ["migrate"]
+
   mqtt-init:
     image: zerotrust-mosquitto:2.0.22
     build:
@@ -107,7 +125,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
-      db-roles-init:
+      db-migrate:
         condition: service_completed_successfully
       mqtt-bootstrap:
         condition: service_completed_successfully
@@ -116,8 +134,6 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-zerotrust}
       DB_USERNAME: ${DB_USERNAME:?Copy .env.example to .env and set DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD:?Copy .env.example to .env and set DB_PASSWORD}
-      DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME:?Set DB_MIGRATION_USERNAME in .env}
-      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:?Set DB_MIGRATION_PASSWORD in .env}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
       JWT_EXPIRATION_SECONDS: ${JWT_EXPIRATION_SECONDS:-3600}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}

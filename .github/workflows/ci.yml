@@ -67,7 +67,7 @@ jobs:
             sleep 2
           done
           docker compose ps --all
-          docker compose logs --no-color --timestamps postgres db-roles-init mqtt-init mqtt-bootstrap backend || true
+          docker compose logs --no-color --timestamps postgres db-roles-init db-migrate mqtt-init mqtt-bootstrap backend || true
           docker compose logs --no-color --timestamps mosquitto \
             | grep -Ei 'not author|denied|error|iot/telemetry|dynsec' || true
           exit 1
@@ -170,7 +170,7 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          docker compose logs --no-color --timestamps postgres db-roles-init mqtt-init mqtt-bootstrap backend || true
+          docker compose logs --no-color --timestamps postgres db-roles-init db-migrate mqtt-init mqtt-bootstrap backend || true
           docker compose logs --no-color --timestamps mosquitto \
             | grep -Ei 'PUBLISH.*iot/telemetry|not author|denied|PHASE10-|PHASE11-|iot/telemetry|dynsec:.*(createClient|modifyClient)' || true
 

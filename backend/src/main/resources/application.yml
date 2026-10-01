@@ -10,8 +10,7 @@ spring:
     password: ${DB_PASSWORD}
     driver-class-name: org.postgresql.Driver
   flyway:
-    user: ${DB_MIGRATION_USERNAME:zerotrust_migrator}
-    password: ${DB_MIGRATION_PASSWORD}
+    enabled: false
   jpa:
     open-in-view: false
     hibernate:
