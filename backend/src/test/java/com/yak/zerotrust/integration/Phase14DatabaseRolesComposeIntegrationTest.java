@@ -29,19 +29,19 @@ class Phase14DatabaseRolesComposeIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Duration HTTP_TIMEOUT = Duration.ofSeconds(10);
     private static final String ADMIN_PSQL_COMMAND =
-            "psql -v ON_ERROR_STOP=1 -v runtime_username=\"$DB_USERNAME\" "
-                    + "-v migration_username=\"$DB_MIGRATION_USERNAME\" "
-                    + "-U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"$1\"";
+            "printf '%s\\n' \"$1\" | psql -v ON_ERROR_STOP=1 "
+                    + "-v runtime_username=\"$DB_USERNAME\" -v migration_username=\"$DB_MIGRATION_USERNAME\" "
+                    + "-U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\"";
     private static final String ADMIN_PSQL_QUERY_COMMAND =
-            "psql -v ON_ERROR_STOP=1 -t -A -v runtime_username=\"$DB_USERNAME\" "
-                    + "-v migration_username=\"$DB_MIGRATION_USERNAME\" "
-                    + "-U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -c \"$1\"";
+            "printf '%s\\n' \"$1\" | psql -v ON_ERROR_STOP=1 -t -A "
+                    + "-v runtime_username=\"$DB_USERNAME\" -v migration_username=\"$DB_MIGRATION_USERNAME\" "
+                    + "-U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\"";
     private static final String RUNTIME_PSQL_COMMAND =
-            "PGPASSWORD=\"$DB_PASSWORD\" psql -v ON_ERROR_STOP=1 -h 127.0.0.1 "
-                    + "-U \"$DB_USERNAME\" -d \"$POSTGRES_DB\" -c \"$1\"";
+            "printf '%s\\n' \"$1\" | PGPASSWORD=\"$DB_PASSWORD\" psql -v ON_ERROR_STOP=1 -h 127.0.0.1 "
+                    + "-U \"$DB_USERNAME\" -d \"$POSTGRES_DB\"";
     private static final String MIGRATION_PSQL_COMMAND =
-            "PGPASSWORD=\"$DB_MIGRATION_PASSWORD\" psql -v ON_ERROR_STOP=1 -h 127.0.0.1 "
-                    + "-U \"$DB_MIGRATION_USERNAME\" -d \"$POSTGRES_DB\" -c \"$1\"";
+            "printf '%s\\n' \"$1\" | PGPASSWORD=\"$DB_MIGRATION_PASSWORD\" "
+                    + "psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U \"$DB_MIGRATION_USERNAME\" -d \"$POSTGRES_DB\"";
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
