@@ -8,17 +8,36 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Copy .env.example to .env and set POSTGRES_ADMIN_PASSWORD}
       DB_USERNAME: ${DB_USERNAME:?Copy .env.example to .env and set DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD:?Copy .env.example to .env and set DB_PASSWORD}
+      DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME:?Set DB_MIGRATION_USERNAME in .env}
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:?Set DB_MIGRATION_PASSWORD in .env}
     ports:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init/01-create-app-user.sh:/docker-entrypoint-initdb.d/01-create-app-user.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
       interval: 5s
       timeout: 3s
       retries: 10
       start_period: 5s
+
+  db-roles-init:
+    image: postgres:16-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zerotrust}
+      POSTGRES_USER: postgres
+      POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}
+      DB_USERNAME: ${DB_USERNAME:?Set DB_USERNAME in .env}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME:?Set DB_MIGRATION_USERNAME in .env}
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:?Set DB_MIGRATION_PASSWORD in .env}
+    volumes:
+      - ./postgres/scripts/bootstrap-db-roles.sh:/scripts/bootstrap-db-roles.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/bootstrap-db-roles.sh"]
 
   mqtt-init:
     image: zerotrust-mosquitto:2.0.22
@@ -88,8 +107,8 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
+      db-roles-init:
+        condition: service_completed_successfully
       mqtt-bootstrap:
         condition: service_completed_successfully
     environment:
@@ -97,6 +116,8 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-zerotrust}
       DB_USERNAME: ${DB_USERNAME:?Copy .env.example to .env and set DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD:?Copy .env.example to .env and set DB_PASSWORD}
+      DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME:?Set DB_MIGRATION_USERNAME in .env}
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:?Set DB_MIGRATION_PASSWORD in .env}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
       JWT_EXPIRATION_SECONDS: ${JWT_EXPIRATION_SECONDS:-3600}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}

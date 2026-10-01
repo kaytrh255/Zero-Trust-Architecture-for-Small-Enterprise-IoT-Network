@@ -18,6 +18,7 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 11:** actual device-status transitions and policy CREATE/UPDATE/DELETE operations write typed management-audit records with authenticated actor, timestamp, and before/after snapshots in the same transaction; admins/security analysts can read the latest history, including policy history after deletion.
 - **Phase 12:** all audit-history APIs support a consistent page envelope, stable newest-first ordering, inclusive timestamp ranges, and event-specific filters; page size is capped at 100 and existing role protections remain in force.
 - **Phase 13:** Flyway makes all four audit histories append-only; opt-in Compose checks inject database failures to verify mutation/audit rollback and exercise timestamp-tie pagination.
+- **Phase 14:** separate PostgreSQL runtime and Flyway migration roles; idempotent startup bootstrapping transfers existing object ownership without discarding volumes, while Compose checks prove runtime DML still works and runtime DDL/trigger changes are denied.
 
 The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
 
@@ -43,7 +44,7 @@ Set a JWT signing key in `.env`:
 openssl rand -base64 32
 ```
 
-Put the generated value after `JWT_SECRET=`. Replace the sample application, PostgreSQL, Dynamic Security administrator, and backend MQTT passwords before using the demo. Keep `.env` private; Git ignores it. Existing `.env` files from Phase 6 need the new `MQTT_DYNSEC_ADMIN_USERNAME`, `MQTT_DYNSEC_ADMIN_PASSWORD`, `MQTT_BACKEND_USERNAME`, and `MQTT_BACKEND_PASSWORD` values; the old shared `MQTT_USERNAME` / `MQTT_PASSWORD` settings are no longer used.
+Put the generated value after `JWT_SECRET=`. Replace the sample application-runtime, database-admin, database-migration, Dynamic Security administrator, and backend MQTT passwords before using the demo; keep all three PostgreSQL passwords distinct. Keep `.env` private; Git ignores it. Existing `.env` files must add `DB_MIGRATION_USERNAME` and `DB_MIGRATION_PASSWORD` (and the Phase 7 `MQTT_DYNSEC_ADMIN_USERNAME`, `MQTT_DYNSEC_ADMIN_PASSWORD`, `MQTT_BACKEND_USERNAME`, and `MQTT_BACKEND_PASSWORD` values); the old shared `MQTT_USERNAME` / `MQTT_PASSWORD` settings are no longer used. For an existing PostgreSQL volume, keep `POSTGRES_ADMIN_PASSWORD` set to the password that currently authenticates the stored `postgres` administrator; Compose does not rotate an initialized volume's administrator password just because `.env` changed.
 
 Start or rebuild the services:
 
@@ -52,7 +53,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Compose runs PostgreSQL, an initialization step for local TLS/Dynamic Security, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. The `mqtt-init` and `mqtt-bootstrap` containers should finish with exit code `0`; they are one-shot setup services. Flyway creates/updates users, devices, policies, access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 prevents UPDATE/DELETE of rows in all four audit-history tables. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
+Compose runs PostgreSQL, an idempotent `db-roles-init` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. `db-roles-init`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. Spring's application datasource uses `DB_USERNAME` / `DB_PASSWORD` for runtime DML; Flyway uses the separate `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD` connection for migrations. Flyway creates/updates users, devices, policies, access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 prevents UPDATE/DELETE of rows in all four audit-history tables. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
 
 Check the backend and database:
 
@@ -272,7 +273,7 @@ export PHASE10_MQTT_CA_FILE="$PWD/mosquitto/tls/ca.crt"
 
 The test checks: (1) admin and two USER JWT flows plus health, (2) one-time per-device credentials and rotation invalidating the old password, (3) trusted TLS, client-ID, and cross-device topic ACL behavior, (4) ALLOW, replay, status, explicit DENY, and default-DENY MQTT outcomes with audits and persistence checks, (5) ADMIN-only owner transfer and its persisted old/new owner, actor, and timestamp history (including idempotent repeat behavior), and (6) owner ALLOW, non-owner `DEVICE_NOT_OWNED`, explicit policy DENY, blocked-device DENY, and no-match default DENY on the protected resource. All denied resource reads return an audit ID and empty telemetry. Test-created records use `phase10-` / `PHASE10-` prefixes.
 
-Use Java 21 and Maven 3.9+ on the host. To run unit tests without Compose, use `cd backend && mvn test`; the integration test remains disabled unless `PHASE10_INTEGRATION=true`. `.github/workflows/ci.yml` runs the unit suite, starts Compose with per-job local credentials, waits for backend health, runs the Phase 10 MQTT/ownership test and the Phase 11 and 13 audit tests, adds Maven test reports to the job summary, collects container logs on failure, and removes the ephemeral Compose volumes. The workflow uses no GitHub secrets. Its results are reported on pull requests and pushes to `main` or this development branch.
+Use Java 21 and Maven 3.9+ on the host. To run unit tests without Compose, use `cd backend && mvn test`; the integration test remains disabled unless `PHASE10_INTEGRATION=true`. `.github/workflows/ci.yml` runs the unit suite, starts Compose with per-job local credentials, waits for backend health, runs the Phase 10 MQTT/ownership test and the Phase 11, 13, and 14 audit/database-role tests, adds Maven test reports to the job summary, collects container logs on failure, and removes the ephemeral Compose volumes. The workflow uses no GitHub secrets. Its results are reported on pull requests and pushes to `main` or this development branch.
 
 ## Phase 11: test device-status and policy-change history
 
@@ -314,7 +315,7 @@ The JSON body contains `content`, `page`, `size`, `totalElements`, `totalPages`,
 
 ## Phase 13: verify audit integrity and rollback
 
-Migration V10 makes access, ownership, status, and policy audit rows append-only for normal row DML: PostgreSQL rejects UPDATE/DELETE operations. This is not tamper-proof storage against a database owner who can alter or disable triggers. The opt-in integration test uses temporary PostgreSQL triggers to make selected inserts/deletes fail, then checks that the paired device/policy mutation also rolls back. It also forces two real status changes to share a timestamp to verify the ID-descending page tie-break. The test creates a USER, device, policy, and associated audit rows that remain in the local database; run it only on a disposable/demo Compose stack. Temporary failure/timestamp triggers are removed in cleanup.
+Migration V10 makes access, ownership, status, and policy audit rows append-only for normal row DML: PostgreSQL rejects UPDATE/DELETE operations. Phase 14 gives the application runtime role DML only and moves audit-table ownership to the separate Flyway migration role, so the runtime role cannot alter tables or disable/drop these triggers. This is not tamper-proof storage against the migration role or PostgreSQL administrator. The opt-in integration test uses temporary PostgreSQL triggers to make selected inserts/deletes fail, then checks that the paired device/policy mutation also rolls back. It also forces two real status changes to share a timestamp to verify the ID-descending page tie-break. The test creates a USER, device, policy, and associated audit rows that remain in the local database; run it only on a disposable/demo Compose stack. Temporary failure/timestamp triggers are removed in cleanup.
 
 ```bash
 set -a
@@ -329,7 +330,24 @@ export PHASE13_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
 
 Expected checks: a status change, owner transfer, policy create, or policy update whose audit insert fails returns an error and leaves the mutation unchanged; a policy DELETE whose database delete fails also rolls back the already-inserted DELETE event. Direct UPDATE/DELETE attempts against each audit table are rejected and the rows remain readable. The status-history page at `page=0&size=1` returns the larger ID when both events have the same timestamp, and page 1 returns the other event. Authorization and decision behavior are unchanged: the fixture's active device with an unmatched resource returns HTTP `200` with `DENY` / `NO_MATCHING_POLICY`; existing explicit-DENY precedence, `DEVICE_NOT_ACTIVE`, and default DENY still apply. The test needs the Docker Compose CLI because it temporarily runs `psql` inside the local PostgreSQL container; the triggers carry unique test names and are removed during test cleanup.
 
-Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, and 13 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, and `PHASE13_INTEGRATION` environment variables. GitHub Actions runs all three against an ephemeral Compose stack.
+## Phase 14: verify database-role separation and existing-volume upgrade
+
+The Phase 14 integration test targets the running Compose stack and is opt-in. It checks that the runtime role is not privileged or an owner, that the migration role owns Flyway-managed objects and can run DDL, that application policy CRUD still succeeds using the runtime datasource, and that runtime connections cannot create/alter tables or disable/drop the append-only triggers. To cover existing volumes, the test creates a fixture table owned by the old runtime role, reruns `db-roles-init`, and verifies ownership and runtime DML/sequence access are migrated in place. The fixture table is removed during cleanup; policy audit history is append-only and remains. Use a disposable/demo stack, not production data. The upgrade does not require deleting `postgres_data`.
+
+```bash
+set -a
+. ./.env
+set +a
+export PHASE14_INTEGRATION=true
+export PHASE14_ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
+export PHASE14_ADMIN_PASSWORD="$ADMIN_PASSWORD"
+export PHASE14_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
+(cd backend && mvn -Dtest=Phase14DatabaseRolesComposeIntegrationTest test)
+```
+
+Run the test only after `docker compose up --build -d` has completed successfully, so PostgreSQL role bootstrap, Flyway migrations, and the backend are ready. It also needs the Docker Compose CLI to invoke `psql` and rerun the one-shot role bootstrap inside the existing stack. The bootstrap service is idempotent and also runs automatically before the backend on subsequent starts.
+
+Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, and 14 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, and `PHASE14_INTEGRATION` environment variables. GitHub Actions runs the complete suite against an ephemeral Compose stack.
 
 ## Security locations and limitations
 

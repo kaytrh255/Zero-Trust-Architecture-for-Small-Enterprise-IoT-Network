@@ -23,13 +23,16 @@ Spring Boot application <====== verified TLS ======> Mosquitto :8883
   ├── PolicyChangeAuditService / TelemetryIngestionService
   ├── repositories / Flyway migrations
   └── TelemetryQueryService
-      |
-      | JDBC as a non-superuser application role
+      | runtime datasource uses DB_USERNAME for application DML
+      | Flyway uses DB_MIGRATION_USERNAME for startup migrations
       v
 PostgreSQL (Docker volume)
+  ├── runtime role: DML only; owns no application schema objects
+  ├── migration role: owns public objects; may create/alter them
+  └── db-roles-init: idempotent PostgreSQL-admin bootstrap before backend
 ```
 
-The broker exposes no plaintext MQTT listener. Compose generates a local CA and a broker certificate with `mosquitto`, `localhost`, and `127.0.0.1` SAN entries. Backend MQTT clients trust that CA and enable hostname verification. These generated development certificates are ignored by Git.
+The broker exposes no plaintext MQTT listener. Compose generates a local CA and a broker certificate with `mosquitto`, `localhost`, and `127.0.0.1` SAN entries. Backend MQTT clients trust that CA and enable hostname verification. These generated development certificates are ignored by Git. The database bootstrap also transfers ownership on existing volumes in place; it does not require deleting application data.
 
 ## Authentication request path
 
@@ -100,4 +103,4 @@ Mosquitto authenticates the MQTT username and assigns that device a role with a 
 
 ## Persistence
 
-Flyway migrations `V1__create_users.sql` through `V10__make_audit_history_append_only.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed access-audit reasons; V8 creates the separate ownership-transfer history table; V9 adds separate status-transition and policy-change history tables with actor references and history indexes; V10 installs database triggers that reject UPDATE and DELETE statements on all four audit-history tables. Device ownership itself remains in `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically.
+Flyway migrations `V1__create_users.sql` through `V10__make_audit_history_append_only.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed access-audit reasons; V8 creates the separate ownership-transfer history table; V9 adds separate status-transition and policy-change history tables with actor references and history indexes; V10 installs database triggers that reject UPDATE and DELETE statements on all four audit-history tables. Device ownership itself remains in `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically. Phase 14 configures distinct Spring datasource and Flyway credentials. Compose's idempotent `db-roles-init` transfers `public` schema/table/sequence/view and audit-function ownership to the migration role before backend startup, including on an existing volume; the runtime role receives only application DML and cannot disable/drop the append-only triggers.
