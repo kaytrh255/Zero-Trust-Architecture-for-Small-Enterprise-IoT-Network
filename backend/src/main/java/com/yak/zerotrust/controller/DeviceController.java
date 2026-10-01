@@ -13,7 +13,9 @@ import com.yak.zerotrust.security.UserPrincipal;
 import com.yak.zerotrust.service.DeviceService;
 import jakarta.validation.Valid;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.CacheControl;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -91,18 +93,21 @@ public class DeviceController {
 
     @PostMapping
     @PreAuthorize("hasRole('ADMIN')")
-    @ResponseStatus(HttpStatus.CREATED)
-    public DeviceProvisioningResponse create(
+    public ResponseEntity<DeviceProvisioningResponse> create(
             @Valid @RequestBody DeviceRequest request,
             @AuthenticationPrincipal UserPrincipal principal
     ) {
-        return deviceService.create(request, principal.getId());
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .cacheControl(CacheControl.noStore())
+                .body(deviceService.create(request, principal.getId()));
     }
 
     @PostMapping("/{id}/credentials/rotate")
     @PreAuthorize("hasRole('ADMIN')")
-    public DeviceProvisioningResponse rotateMqttCredential(@PathVariable Long id) {
-        return deviceService.rotateMqttCredential(id);
+    public ResponseEntity<DeviceProvisioningResponse> rotateMqttCredential(@PathVariable Long id) {
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(deviceService.rotateMqttCredential(id));
     }
 
     @PutMapping("/{id}")

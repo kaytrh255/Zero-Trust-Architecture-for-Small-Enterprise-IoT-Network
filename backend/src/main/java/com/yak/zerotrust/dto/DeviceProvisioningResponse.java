@@ -1,9 +1,10 @@
 package com.yak.zerotrust.dto;
 
-/** MQTT credentials are returned only when the broker account is created or rotated. */
+/** Device secrets are returned only when the broker account and signing key are created or rotated. */
 public record DeviceProvisioningResponse(
         DeviceResponse device,
         String mqttUsername,
-        String mqttPassword
+        String mqttPassword,
+        String mqttSigningPrivateKey
 ) {
 }

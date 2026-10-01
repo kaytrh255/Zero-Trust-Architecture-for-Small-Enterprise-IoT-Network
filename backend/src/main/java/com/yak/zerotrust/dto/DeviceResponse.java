@@ -12,6 +12,7 @@ public record DeviceResponse(
         DeviceType deviceType,
         String ipAddress,
         String mqttClientId,
+        boolean mqttSignatureEnabled,
         DeviceStatus status,
         Long ownerId,
         String ownerUsername,

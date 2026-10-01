@@ -22,8 +22,9 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 15:** run Flyway in its own one-shot Compose service so migration credentials are not injected into the backend container; the backend starts only after migrations complete.
 - **Phase 16:** audit successful and rejected API logins in a separate append-only history; only admins and security analysts can search the paged records, which never contain passwords or JWTs.
 - **Phase 17:** throttle login attempts per socket peer address with a bounded in-memory fixed window; excess requests receive HTTP `429` and `Retry-After`, without trusting forwarded-IP headers.
+- **Phase 18:** sign MQTT telemetry with a per-device Ed25519 key; the backend verifies signatures before policy/replay evaluation and auditing.
 
-The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. There is no React dashboard or physical-device deployment.
+The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. The web frontend is planned next (Phase 19); there is no physical-device deployment.
 
 ## Requirements
 
@@ -56,7 +57,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Compose runs PostgreSQL, an idempotent `db-roles-init` step, a separate one-shot Flyway `db-migrate` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. `db-roles-init`, `db-migrate`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. The separate `db-migrate` Flyway CLI service uses `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; the backend receives only `DB_USERNAME` / `DB_PASSWORD` for runtime DML and does not receive migration credentials. Flyway creates/updates users, devices, policies, authentication/access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history. The generated CA, broker certificate, and private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
+Compose runs PostgreSQL, an idempotent `db-roles-init` step, a separate one-shot Flyway `db-migrate` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, and the backend. `db-roles-init`, `db-migrate`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. The separate `db-migrate` Flyway CLI service uses `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; the backend receives only `DB_USERNAME` / `DB_PASSWORD` for runtime DML and does not receive migration credentials. Flyway creates/updates users, devices, policies, authentication/access/ownership/status/policy-change audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history; V12 adds the nullable per-device MQTT signing public key. The generated CA, broker certificate, and TLS private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
 
 Check the backend and database:
 
@@ -113,7 +114,7 @@ curl -i http://localhost:8080/api/policies \
 
 Use `/api/policies` `POST`, `PUT /api/policies/{id}`, and `DELETE /api/policies/{id}` to manage rules. Choose a new unique name when creating a policy; for example, `Sensor Read Data Extra` is not one of the seeded names.
 
-## Provision a per-device MQTT identity (Phases 6–7)
+## Provision a per-device MQTT identity (Phases 6–7 and 18)
 
 List devices to find the ID of a bootstrapped device:
 
@@ -122,16 +123,16 @@ curl -i http://localhost:8080/api/devices \
   -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
 ```
 
-Rotate/provision its broker password (replace `1` with the listed ID):
+Rotate/provision its broker and signing credentials (replace `1` with the listed ID):
 
 ```bash
 curl -i -X POST http://localhost:8080/api/devices/1/credentials/rotate \
   -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
 ```
 
-The response includes `mqttUsername` (the uppercase device code) and a random `mqttPassword`, both returned only on create/rotation. Save the password directly in the device's local secret store; do not commit or log it. Mosquitto Dynamic Security authenticates the username/password and fixed `mqttClientId`; PostgreSQL does not store the password. Rotation invalidates the previous broker password. Phase 6's `deviceToken` field in the telemetry body is retired; after upgrading, rotate each existing device credential to provision its broker account. A device code and MQTT client ID cannot be changed after provisioning; create a new device identity instead. Broker accounts stay enabled when a device is `INACTIVE`, `BLOCKED`, or `REVOKED` so authorized-topic messages can reach the backend status check and be audited; they are never stored while status is non-`ACTIVE`.
+The response includes `mqttUsername` (the uppercase device code), a random `mqttPassword`, and the one-time `mqttSigningPrivateKey`. Save both secrets directly in the device's local secret store; never commit or log them. The backend stores only the Ed25519 public key, not the private key or MQTT password. Provisioning responses use `Cache-Control: no-store`. Rotation changes both the broker password and signing key pair, invalidating the old credentials. Phase 6's `deviceToken` field in the telemetry body is retired; after upgrading, rotate each existing device credential to provision its broker account and a signing key. A device code and MQTT client ID cannot be changed after provisioning; create a new device identity instead. Broker accounts stay enabled when a device is `INACTIVE`, `BLOCKED`, or `REVOKED` so authorized-topic messages can reach the backend status check and be audited; they are never stored while status is non-`ACTIVE`.
 
-For a device created with `POST /api/devices`, the broker account is provisioned immediately and the HTTP response has the same credential fields.
+For a device created with `POST /api/devices`, the broker account and signing key are provisioned immediately; the HTTP response returns the same one-time secrets.
 
 ## Request an access decision (Phase 5)
 
@@ -174,17 +175,34 @@ curl -i http://localhost:8080/api/resources/devices/SENSOR-001/telemetry \
 
 `ALLOW` returns HTTP `200` with the access decision and up to 100 samples for that target device. A DENY returns HTTP `403`, includes its reason/audit ID, and returns an empty list without querying telemetry. A non-owner is denied as `DEVICE_NOT_OWNED` when the device is active and policy otherwise allows the read. Explicit `DENY` and no-match default `DENY` are evaluated before ownership; blocked devices remain `DEVICE_NOT_ACTIVE`. `/api/access/check` remains a policy-decision demonstration, not a resource fetch, and does not apply ownership enforcement.
 
-## Publish and inspect MQTT telemetry (Phase 7)
+## Publish and inspect MQTT telemetry (Phases 7 and 18)
 
 The Mosquitto listener is bound to `127.0.0.1:8883`, uses verified TLS, and has no plaintext `1883` listener. Host-side MQTT clients must trust `mosquitto/tls/ca.crt`; do not use `--insecure`. Each device authenticates with its own username/password and registered client ID. Mosquitto's device ACL permits publishing only to `iot/telemetry/{same device username}`. The backend subscriber has a separate read-only role for `iot/telemetry/+`.
 
-Using the `mqttUsername`, `mqttPassword`, and `mqttClientId` from the credential response, publish a message. Set a new, increasing sequence for every new accepted sample:
+Use the `mqttUsername`, `mqttPassword`, `mqttClientId`, and one-time `mqttSigningPrivateKey` from the provisioning response. The Ed25519 private key is base64url-encoded PKCS#8 DER. The signed payload is the exact UTF-8 telemetry JSON bytes; the MQTT wire body is a JSON envelope containing unpadded base64url `payload` and `signature` fields. Keep secrets out of source control, shell history, and logs.
+
+This Bash example requires `openssl` and `mosquitto_pub`. Set `MQTT_DEVICE_SIGNING_PRIVATE_KEY` from the provisioning response in a secure environment rather than committing it:
 
 ```bash
 export MQTT_DEVICE_USERNAME='SENSOR-001'
 export MQTT_DEVICE_PASSWORD='PASTE_ONE_TIME_MQTT_PASSWORD_HERE'
+export MQTT_DEVICE_SIGNING_PRIVATE_KEY='PASTE_ONE_TIME_BASE64URL_ED25519_PRIVATE_KEY_HERE'
 export MQTT_DEVICE_CLIENT_ID='SENSOR-001'
 export MQTT_SEQUENCE=1
+
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+printf '%s' "$MQTT_DEVICE_SIGNING_PRIVATE_KEY" \
+  | tr '_-' '/+' | openssl base64 -d -A > "$work_dir/device-key.der"
+openssl pkey -inform DER -in "$work_dir/device-key.der" -out "$work_dir/device-key.pem"
+printf '{"sequence":%s,"metric":"temperature","value":22.5,"unit":"C"}' "$MQTT_SEQUENCE" \
+  > "$work_dir/payload.json"
+openssl pkeyutl -sign -rawin -inkey "$work_dir/device-key.pem" \
+  -in "$work_dir/payload.json" -out "$work_dir/signature.bin"
+payload_b64url="$(openssl base64 -A -in "$work_dir/payload.json" | tr '+/' '-_' | tr -d '=')"
+signature_b64url="$(openssl base64 -A -in "$work_dir/signature.bin" | tr '+/' '-_' | tr -d '=')"
+printf '{"payload":"%s","signature":"%s"}' "$payload_b64url" "$signature_b64url" \
+  > "$work_dir/envelope.json"
 
 mosquitto_pub \
   --cafile mosquitto/tls/ca.crt \
@@ -192,10 +210,10 @@ mosquitto_pub \
   -u "$MQTT_DEVICE_USERNAME" -P "$MQTT_DEVICE_PASSWORD" \
   -i "$MQTT_DEVICE_CLIENT_ID" -q 1 \
   -t "iot/telemetry/${MQTT_DEVICE_USERNAME}" \
-  -m "{\"sequence\":${MQTT_SEQUENCE},\"metric\":\"temperature\",\"value\":22.5,\"unit\":\"C\"}"
+  -f "$work_dir/envelope.json"
 ```
 
-The message body has no token. `sequence` is required and positive. For the currently accepted high-water mark `N`, sequence `N+1` can be accepted; sequence `N` or lower is audited as `DENY` / `REPLAYED_MESSAGE` and is not stored. A QoS 1 publish may be accepted by Mosquitto but later denied by the application's policy/replay decision; MQTT publish success alone does not mean the telemetry was persisted.
+The signature is verified before policy/replay evaluation. Invalid signatures are audited as `DENY` / `INVALID_DEVICE_CREDENTIAL` and do not consume a sequence or persist telemetry. `sequence` is required, positive, and strictly increasing: for current high-water mark `N`, `N+1` may be accepted; `N` or lower is audited as `REPLAYED_MESSAGE`. A QoS 1 publish may be accepted by Mosquitto but later denied by signature, policy, status, or replay checks; MQTT publish success alone does not mean telemetry was persisted.
 
 Read stored samples and access audits with an administrator token:
 
@@ -207,7 +225,7 @@ curl -i http://localhost:8080/api/access/audits \
   -H 'Authorization: Bearer PASTE_ADMIN_TOKEN_HERE'
 ```
 
-Accepted telemetry includes `deviceSequence`. Evaluated policy/status/replay decisions appear in `access_audits`. Invalid TLS, username/password, client ID, or device-topic ACL attempts are rejected by Mosquitto before backend ingestion; check `docker compose logs mosquitto`, and do not expect an `access_audits` row for a message the backend never received. Malformed payloads are logged and discarded before decision evaluation.
+Accepted telemetry includes `deviceSequence`. Evaluated policy/status/replay decisions and invalid device signatures appear in `access_audits`. Invalid TLS, username/password, client ID, or device-topic ACL attempts are rejected by Mosquitto before backend ingestion; check `docker compose logs mosquitto`, and do not expect an `access_audits` row for a message the backend never received. Malformed envelopes and telemetry JSON are logged and discarded before policy evaluation.
 
 ## Phase 7, 9, 10, 11, and 12 tester checklist
 
@@ -215,8 +233,9 @@ Use an `ADMIN` token for device credential provisioning, status/policy changes, 
 
 | Tester action | Exact expected result |
 |---|---|
-| Rotate the `SENSOR-001` broker password, then connect over TLS with the returned username/password and client ID; publish sequence `1` to `iot/telemetry/SENSOR-001` (or a number above its reported database high-water mark). | TLS and broker authentication succeed; device ACL allows its own topic; backend evaluates status/policy as `ALLOW`; one telemetry row is added, `last_mqtt_sequence` advances, `last_seen_at` updates, and an `ALLOW` audit row is added. |
-| Re-publish the exact same sequence, or any lower sequence, with otherwise valid credentials/payload. | Broker accepts the authorized topic publish; backend returns no HTTP response to the publisher, does not insert telemetry or update `last_seen_at`, and records `DENY` / `REPLAYED_MESSAGE` with `messageSequence`. |
+| Rotate the `SENSOR-001` credentials, connect over TLS with the returned username/password and client ID, sign a telemetry JSON body with `mqttSigningPrivateKey`, and publish the base64url envelope to `iot/telemetry/SENSOR-001`. | TLS and broker authentication succeed; device ACL allows its own topic; the backend verifies Ed25519, evaluates status/policy as `ALLOW`, stores one telemetry row, advances `last_mqtt_sequence`, updates `last_seen_at`, and records an `ALLOW` audit. |
+| Change a signed telemetry body's bytes without recomputing its Ed25519 signature. | Backend records `DENY` / `INVALID_DEVICE_CREDENTIAL`; no telemetry is stored, `last_seen_at` is unchanged, and the sequence high-water mark is not consumed. |
+| Re-publish the exact same signed sequence, or any lower sequence, with otherwise valid credentials. | Broker accepts the authorized topic publish; backend returns no HTTP response to the publisher, does not insert telemetry or update `last_seen_at`, and records `DENY` / `REPLAYED_MESSAGE` with `messageSequence`. |
 | Use `SENSOR-001` credentials to publish to `iot/telemetry/CAMERA-001`. | Mosquitto ACL denies the publish before ingestion; no telemetry row and no database audit are added. Broker log records the denial. |
 | Use a wrong MQTT password or wrong client ID. | Broker rejects the connection; no telemetry or access-audit row. Mosquitto logs the authentication failure. |
 | Omit `--cafile` or supply an untrusted CA. | TLS verification fails before MQTT authentication; no telemetry or access-audit row. |
@@ -274,7 +293,7 @@ export PHASE10_MQTT_CA_FILE="$PWD/mosquitto/tls/ca.crt"
 (cd backend && mvn -Dtest=Phase10ComposeIntegrationTest test)
 ```
 
-The test checks: (1) admin and two USER JWT flows plus health, (2) one-time per-device credentials and rotation invalidating the old password, (3) trusted TLS, client-ID, and cross-device topic ACL behavior, (4) ALLOW, replay, status, explicit DENY, and default-DENY MQTT outcomes with audits and persistence checks, (5) ADMIN-only owner transfer and its persisted old/new owner, actor, and timestamp history (including idempotent repeat behavior), and (6) owner ALLOW, non-owner `DEVICE_NOT_OWNED`, explicit policy DENY, blocked-device DENY, and no-match default DENY on the protected resource. All denied resource reads return an audit ID and empty telemetry. Test-created records use `phase10-` / `PHASE10-` prefixes.
+The test checks: (1) admin and two USER JWT flows plus health, (2) one-time broker/signing credentials and rotation invalidating the old keys, (3) trusted TLS, client-ID, and cross-device topic ACL behavior, (4) valid Ed25519 telemetry, tamper rejection, replay, status, explicit DENY, and default-DENY MQTT outcomes with audit/persistence checks, (5) ADMIN-only owner transfer and its persisted old/new owner, actor, and timestamp history (including idempotent repeat behavior), and (6) owner ALLOW, non-owner `DEVICE_NOT_OWNED`, explicit policy DENY, blocked-device DENY, and no-match default DENY on the protected resource. All denied resource reads return an audit ID and empty telemetry. Test-created records use `phase10-` / `PHASE10-` prefixes.
 
 Use Java 21 and Maven 3.9+ on the host. To run unit tests without Compose, use `cd backend && mvn test`; the integration test remains disabled unless `PHASE10_INTEGRATION=true`. `.github/workflows/ci.yml` runs the unit suite, starts Compose with per-job local credentials, waits for backend health, runs the Phase 10 MQTT/ownership test and the Phase 11, 13, and 14 audit/database-role tests, adds Maven test reports to the job summary, collects container logs on failure, and removes the ephemeral Compose volumes. The workflow uses no GitHub secrets. Its results are reported on pull requests and pushes to `main` or this development branch.
 
@@ -402,7 +421,13 @@ export PHASE17_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
 (cd backend && mvn -Dtest=Phase17LoginRateLimitComposeIntegrationTest test)
 ```
 
-Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, 14, 16, and 17 Compose integration classes are opt-in via their respective `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, `PHASE16_INTEGRATION`, and `PHASE17_INTEGRATION` environment variables. GitHub Actions runs the complete suite against an ephemeral Compose stack.
+## Phase 18: sign MQTT application payloads
+
+New API-provisioned devices receive an Ed25519 key pair. The database stores only the public key; `POST /api/devices` and `POST /api/devices/{id}/credentials/rotate` return the private key once with the MQTT credentials and `Cache-Control: no-store`. Rotation replaces both credentials. Existing database rows without a key must be rotated before they can publish signed telemetry; `mqttSignatureEnabled` in device responses shows whether a key is registered.
+
+The MQTT body is an envelope with unpadded-base64url `payload` and `signature` fields. The decoded `payload` is the exact UTF-8 telemetry JSON byte sequence, and the signature is Ed25519 over those exact bytes. The backend locks the device, verifies the signature against the key bound to the topic's device identity, then parses the payload and applies status, policy, and replay checks. A bad signature is audited as `DENY` / `INVALID_DEVICE_CREDENTIAL`, with no untrusted sequence; it cannot consume the high-water mark or persist telemetry. The signed payload remains capped at 2048 bytes and the full envelope at 4096 bytes.
+
+`Phase10ComposeIntegrationTest` now exercises a valid signed publish and modifies signed telemetry bytes to verify rejection. Ordinary unit tests run with `cd backend && mvn test`; Phase 10 (including Phase 18), 11, 13, 14, 16, and 17 Compose integration classes are opt-in via `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, `PHASE16_INTEGRATION`, and `PHASE17_INTEGRATION`. GitHub Actions runs the complete suite against an ephemeral Compose stack. The next planned phase is the web frontend (Phase 19).
 
 ## Security locations and limitations
 
@@ -416,7 +441,7 @@ Ordinary unit tests run with `cd backend && mvn test`; Phase 10, 11, 13, 14, 16,
 - Device status transitions and policy CREATE/UPDATE/DELETE audits share the transaction with the mutation. No-op status changes and rejected management requests create no change event; failed login attempts are recorded separately. Policy DELETE history remains available by policy ID after the live policy row is removed.
 - No role can override an explicit `DENY`; missing policies default to `DENY`.
 
-This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, and replay sequence checking, but no signed application payloads, credential expiry, automated CA rotation, MFA, or production secret management. Login throttling is process-local and is not a distributed production rate limiter.
+This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT now uses per-device broker credentials/ACLs, TLS, Ed25519-signed application payloads, and replay sequence checking. The web frontend is next (Phase 19); credential expiry, automated CA rotation, MFA, hardware-backed key storage, and production secret management are not implemented. Login throttling is process-local and is not a distributed production rate limiter.
 
 ## Useful commands
 

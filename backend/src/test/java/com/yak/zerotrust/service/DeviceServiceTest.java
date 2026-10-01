@@ -10,7 +10,9 @@ import com.yak.zerotrust.entity.UserRole;
 import com.yak.zerotrust.exception.DeviceConflictException;
 import com.yak.zerotrust.exception.InvalidDeviceOwnerException;
 import com.yak.zerotrust.exception.UserNotFoundException;
+import com.yak.zerotrust.mqtt.DeviceSigningKeyPair;
 import com.yak.zerotrust.mqtt.MqttDynamicSecurityService;
+import com.yak.zerotrust.mqtt.MqttMessageSignatureService;
 import com.yak.zerotrust.repository.DeviceRepository;
 import com.yak.zerotrust.repository.UserRepository;
 import org.junit.jupiter.api.Test;
@@ -43,6 +45,9 @@ class DeviceServiceTest {
     private DeviceCredentialService deviceCredentialService;
 
     @Mock
+    private MqttMessageSignatureService mqttMessageSignatureService;
+
+    @Mock
     private MqttDynamicSecurityService mqttDynamicSecurityService;
 
     @Mock
@@ -55,21 +60,26 @@ class DeviceServiceTest {
     void createsABrokerClientAndReturnsItsCredentialsOnce() {
         UserAccount owner = new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true);
         String mqttPassword = "A".repeat(43);
+        DeviceSigningKeyPair signingKeyPair = new DeviceSigningKeyPair("encoded-public-key", "encoded-private-key");
         when(deviceRepository.existsByDeviceCode("SENSOR-003")).thenReturn(false);
         when(deviceRepository.existsByMqttClientId("SENSOR-003")).thenReturn(false);
         when(userRepository.findById(7L)).thenReturn(Optional.of(owner));
         when(deviceCredentialService.issueMqttPassword()).thenReturn(mqttPassword);
+        when(mqttMessageSignatureService.generateKeyPair()).thenReturn(signingKeyPair);
         when(deviceRepository.save(any(Device.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         DeviceProvisioningResponse response = service().create(request(), 7L);
 
         assertThat(response.mqttUsername()).isEqualTo("SENSOR-003");
         assertThat(response.mqttPassword()).isEqualTo(mqttPassword);
+        assertThat(response.mqttSigningPrivateKey()).isEqualTo(signingKeyPair.privateKey());
         assertThat(response.device().deviceCode()).isEqualTo("SENSOR-003");
+        assertThat(response.device().mqttSignatureEnabled()).isTrue();
         verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", mqttPassword);
         ArgumentCaptor<Device> deviceCaptor = ArgumentCaptor.forClass(Device.class);
         verify(deviceRepository).save(deviceCaptor.capture());
         assertThat(deviceCaptor.getValue().getLastMqttSequence()).isZero();
+        assertThat(deviceCaptor.getValue().getMqttSigningPublicKey()).isEqualTo(signingKeyPair.publicKey());
     }
 
     @Test
@@ -82,13 +92,17 @@ class DeviceServiceTest {
                 "SENSOR-003",
                 new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true)
         );
+        DeviceSigningKeyPair signingKeyPair = new DeviceSigningKeyPair("rotated-public-key", "rotated-private-key");
         when(deviceRepository.findById(3L)).thenReturn(Optional.of(device));
         when(deviceCredentialService.issueMqttPassword()).thenReturn("B".repeat(43));
+        when(mqttMessageSignatureService.generateKeyPair()).thenReturn(signingKeyPair);
 
         DeviceProvisioningResponse response = service().rotateMqttCredential(3L);
 
         assertThat(response.mqttUsername()).isEqualTo("SENSOR-003");
         assertThat(response.mqttPassword()).isEqualTo("B".repeat(43));
+        assertThat(response.mqttSigningPrivateKey()).isEqualTo("rotated-private-key");
+        assertThat(device.getMqttSigningPublicKey()).isEqualTo("rotated-public-key");
         verify(mqttDynamicSecurityService).provisionDevice("SENSOR-003", "SENSOR-003", "B".repeat(43));
     }
 
@@ -290,6 +304,7 @@ class DeviceServiceTest {
                 deviceRepository,
                 userRepository,
                 deviceCredentialService,
+                mqttMessageSignatureService,
                 mqttDynamicSecurityService,
                 deviceOwnershipAuditService,
                 deviceStatusAuditService

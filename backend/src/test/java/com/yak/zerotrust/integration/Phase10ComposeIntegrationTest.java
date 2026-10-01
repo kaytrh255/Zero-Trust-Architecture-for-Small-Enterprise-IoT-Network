@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.yak.zerotrust.mqtt.MqttTlsSupport;
+import com.yak.zerotrust.testsupport.MqttTestMessageSigner;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
@@ -96,6 +97,7 @@ class Phase10ComposeIntegrationTest {
         assertThat(ownershipAudits(adminToken, originalSensor.deviceId())).isEmpty();
 
         DeviceCredentials sensor = rotateCredentials(adminToken, originalSensor);
+        assertThat(sensor.signingPrivateKey()).isNotEqualTo(originalSensor.signingPrivateKey());
         transferOwnership(adminToken, sensor.deviceId(), ownerUsername);
         JsonNode transferredDevice = getDevice(adminToken, sensor.deviceId());
         assertThat(transferredDevice.path("ownerUsername").asText()).isEqualTo(ownerUsername);
@@ -138,7 +140,8 @@ class Phase10ComposeIntegrationTest {
                 originalSensor.deviceCode(),
                 originalSensor.clientId(),
                 originalSensor.username(),
-                originalSensor.password()
+                originalSensor.password(),
+                originalSensor.signingPrivateKey()
         ), originalSensor.clientId(), true, "A rotated MQTT password must stop authenticating");
 
         assertConnectionRejected(sensor, sensor.clientId(), false,
@@ -151,6 +154,12 @@ class Phase10ComposeIntegrationTest {
         awaitTelemetry(adminToken, sensorCode, 1L, true);
         String lastSeenAfterAllow = getDevice(adminToken, sensor.deviceId()).path("lastSeenAt").asText();
         assertThat(lastSeenAfterAllow).isNotBlank();
+
+        publishTampered(sensor, sensorCode, 2);
+        awaitAudit(adminToken, sensorCode, "INVALID_DEVICE_CREDENTIAL", null);
+        assertNoTelemetry(adminToken, sensorCode, 2L);
+        assertThat(getDevice(adminToken, sensor.deviceId()).path("lastSeenAt").asText())
+                .isEqualTo(lastSeenAfterAllow);
 
         String otherDeviceCode = "PHASE10-OTHER-" + suffix;
         tryPublish(sensor, otherDeviceCode, 1);
@@ -318,13 +327,17 @@ class Phase10ComposeIntegrationTest {
                 .put("mqttClientId", deviceCode);
         HttpResult result = request("POST", "/api/devices", adminToken, body);
         assertStatus(result, 201);
+        assertThat(result.cacheControl()).contains("no-store");
         JsonNode response = result.body();
+        assertThat(response.path("device").path("mqttSignatureEnabled").asBoolean()).isTrue();
+        assertThat(response.path("mqttSigningPrivateKey").asText()).isNotBlank();
         return new DeviceCredentials(
                 response.path("device").path("id").asLong(),
                 response.path("device").path("deviceCode").asText(),
                 response.path("device").path("mqttClientId").asText(),
                 response.path("mqttUsername").asText(),
-                response.path("mqttPassword").asText()
+                response.path("mqttPassword").asText(),
+                response.path("mqttSigningPrivateKey").asText()
         );
     }
 
@@ -340,12 +353,14 @@ class Phase10ComposeIntegrationTest {
                 "POST", "/api/devices/" + existing.deviceId() + "/credentials/rotate", adminToken, null
         );
         assertStatus(result, 200);
+        assertThat(result.cacheControl()).contains("no-store");
         return new DeviceCredentials(
                 existing.deviceId(),
                 existing.deviceCode(),
                 result.body().path("device").path("mqttClientId").asText(),
                 result.body().path("mqttUsername").asText(),
-                result.body().path("mqttPassword").asText()
+                result.body().path("mqttPassword").asText(),
+                result.body().path("mqttSigningPrivateKey").asText()
         );
     }
 
@@ -383,23 +398,47 @@ class Phase10ComposeIntegrationTest {
     }
 
     private void publish(DeviceCredentials credentials, String topicDeviceCode, long sequence) throws Exception {
+        byte[] telemetryPayload = telemetryPayload(sequence);
+        publishEnvelope(
+                credentials,
+                topicDeviceCode,
+                MqttTestMessageSigner.envelope(telemetryPayload, credentials.signingPrivateKey())
+        );
+    }
+
+    private void publishTampered(DeviceCredentials credentials, String topicDeviceCode, long sequence) throws Exception {
+        byte[] signedPayload = telemetryPayload(sequence);
+        ObjectNode changedPayload = (ObjectNode) JSON.readTree(signedPayload);
+        changedPayload.put("value", 99.5);
+        byte[] transmittedPayload = JSON.writeValueAsBytes(changedPayload);
+        publishEnvelope(
+                credentials,
+                topicDeviceCode,
+                MqttTestMessageSigner.envelope(
+                        signedPayload,
+                        transmittedPayload,
+                        credentials.signingPrivateKey()
+                )
+        );
+    }
+
+    private void publishEnvelope(DeviceCredentials credentials, String topicDeviceCode, byte[] envelope) throws Exception {
         MqttClient client = new MqttClient(brokerUri, credentials.clientId(), new MemoryPersistence());
         try {
             client.connect(connectOptions(credentials, true));
-            ObjectNode payload = JSON.createObjectNode()
-                    .put("sequence", sequence)
-                    .put("metric", "phase10")
-                    .put("value", 22.5)
-                    .put("unit", "C");
-            client.publish(
-                    "iot/telemetry/" + topicDeviceCode,
-                    JSON.writeValueAsBytes(payload),
-                    1,
-                    false
-            );
+            client.publish("iot/telemetry/" + topicDeviceCode, envelope, 1, false);
         } finally {
             closeQuietly(client);
         }
+    }
+
+    private byte[] telemetryPayload(long sequence) throws Exception {
+        ObjectNode payload = JSON.createObjectNode()
+                .put("sequence", sequence)
+                .put("metric", "phase10")
+                .put("value", 22.5)
+                .put("unit", "C");
+        return JSON.writeValueAsBytes(payload);
     }
 
     private void tryPublish(DeviceCredentials credentials, String topicDeviceCode, long sequence) throws Exception {
@@ -407,17 +446,9 @@ class Phase10ComposeIntegrationTest {
         try {
             client = new MqttClient(brokerUri, credentials.clientId(), new MemoryPersistence());
             client.connect(connectOptions(credentials, true));
-            ObjectNode payload = JSON.createObjectNode()
-                    .put("sequence", sequence)
-                    .put("metric", "phase10")
-                    .put("value", 22.5)
-                    .put("unit", "C");
-            client.publish(
-                    "iot/telemetry/" + topicDeviceCode,
-                    JSON.writeValueAsBytes(payload),
-                    1,
-                    false
-            );
+            byte[] telemetryPayload = telemetryPayload(sequence);
+            byte[] envelope = MqttTestMessageSigner.envelope(telemetryPayload, credentials.signingPrivateKey());
+            client.publish("iot/telemetry/" + topicDeviceCode, envelope, 1, false);
         } catch (MqttException expectedBrokerRejection) {
             // QoS 1 brokers may reject an ACL violation during publish or silently drop it.
         } finally {
@@ -590,7 +621,11 @@ class Phase10ComposeIntegrationTest {
                 responseBody = JSON.getNodeFactory().textNode(response.body());
             }
         }
-        return new HttpResult(response.statusCode(), responseBody);
+        return new HttpResult(
+                response.statusCode(),
+                responseBody,
+                response.headers().firstValue("Cache-Control").orElse("")
+        );
     }
 
     private static void assertStatus(HttpResult result, int expectedStatus) {
@@ -626,10 +661,17 @@ class Phase10ComposeIntegrationTest {
         return value;
     }
 
-    private record DeviceCredentials(long deviceId, String deviceCode, String clientId, String username, String password) {
+    private record DeviceCredentials(
+            long deviceId,
+            String deviceCode,
+            String clientId,
+            String username,
+            String password,
+            String signingPrivateKey
+    ) {
     }
 
-    private record HttpResult(int status, JsonNode body) {
+    private record HttpResult(int status, JsonNode body, String cacheControl) {
     }
 
     @FunctionalInterface

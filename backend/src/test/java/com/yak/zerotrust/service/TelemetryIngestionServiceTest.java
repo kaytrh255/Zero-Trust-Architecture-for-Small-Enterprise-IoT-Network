@@ -14,7 +14,11 @@ import com.yak.zerotrust.entity.DeviceType;
 import com.yak.zerotrust.entity.PolicyAction;
 import com.yak.zerotrust.entity.UserAccount;
 import com.yak.zerotrust.entity.UserRole;
+import com.yak.zerotrust.mqtt.DeviceSigningKeyPair;
+import com.yak.zerotrust.mqtt.MqttMessageSignatureService;
+import com.yak.zerotrust.repository.DeviceRepository;
 import com.yak.zerotrust.repository.DeviceTelemetryRepository;
+import com.yak.zerotrust.testsupport.MqttTestMessageSigner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -23,6 +27,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -38,20 +43,27 @@ class TelemetryIngestionServiceTest {
     private ZeroTrustDecisionService zeroTrustDecisionService;
 
     @Mock
+    private AccessAuditService accessAuditService;
+
+    @Mock
+    private DeviceRepository deviceRepository;
+
+    @Mock
     private DeviceTelemetryRepository telemetryRepository;
 
+    private final MqttMessageSignatureService messageSignatureService = new MqttMessageSignatureService();
+    private final DeviceSigningKeyPair signingKeyPair = messageSignatureService.generateKeyPair();
+
     @Test
-    void persistsTelemetryOnlyAfterAnAllowDecision() {
+    void verifiesSignatureBeforePolicyEvaluationAndPersistsOnlyAfterAllow() {
         Device device = device(DeviceStatus.ACTIVE);
+        when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
         when(zeroTrustDecisionService.evaluate(any())).thenReturn(new AccessEvaluation(
                 decision(AccessDecisionOutcome.ALLOW, AccessDecisionReason.POLICY_ALLOW), device
         ));
         TelemetryIngestionService service = service();
 
-        boolean stored = service.ingestMqttMessage(
-                "iot/telemetry/sensor-001",
-                payload(3).getBytes(StandardCharsets.UTF_8)
-        );
+        boolean stored = service.ingestMqttMessage("iot/telemetry/sensor-001", signedEnvelope(3));
 
         assertThat(stored).isTrue();
         ArgumentCaptor<DeviceTelemetry> telemetryCaptor = ArgumentCaptor.forClass(DeviceTelemetry.class);
@@ -71,19 +83,42 @@ class TelemetryIngestionServiceTest {
     @Test
     void doesNotPersistTelemetryWhenTheDeviceIsDeniedByPolicyOrStatus() {
         Device device = device(DeviceStatus.BLOCKED);
+        when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
         when(zeroTrustDecisionService.evaluate(any())).thenReturn(new AccessEvaluation(
                 decision(AccessDecisionOutcome.DENY, AccessDecisionReason.DEVICE_NOT_ACTIVE), device
         ));
         TelemetryIngestionService service = service();
 
-        boolean stored = service.ingestMqttMessage(
-                "iot/telemetry/SENSOR-002",
-                payload(1).getBytes(StandardCharsets.UTF_8)
-        );
+        boolean stored = service.ingestMqttMessage("iot/telemetry/SENSOR-001", signedEnvelope(1));
 
         assertThat(stored).isFalse();
         verify(telemetryRepository, never()).save(any(DeviceTelemetry.class));
         assertThat(device.getLastSeenAt()).isNull();
+    }
+
+    @Test
+    void rejectsTamperedPayloadAndAuditsAnInvalidDeviceCredentialBeforePolicyEvaluation() {
+        Device device = device(DeviceStatus.ACTIVE);
+        when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
+        byte[] original = payload(7).getBytes(StandardCharsets.UTF_8);
+        byte[] changed = payload(8).getBytes(StandardCharsets.UTF_8);
+        TelemetryIngestionService service = service();
+
+        boolean stored = service.ingestMqttMessage(
+                "iot/telemetry/SENSOR-001",
+                MqttTestMessageSigner.envelope(original, changed, signingKeyPair.privateKey())
+        );
+
+        assertThat(stored).isFalse();
+        verify(zeroTrustDecisionService, never()).evaluate(any());
+        verify(telemetryRepository, never()).save(any(DeviceTelemetry.class));
+        assertThat(device.getLastMqttSequence()).isZero();
+        ArgumentCaptor<AccessContext> contextCaptor = ArgumentCaptor.forClass(AccessContext.class);
+        ArgumentCaptor<AccessDecision> decisionCaptor = ArgumentCaptor.forClass(AccessDecision.class);
+        verify(accessAuditService).record(contextCaptor.capture(), decisionCaptor.capture());
+        assertThat(contextCaptor.getValue().messageSequence()).isNull();
+        assertThat(decisionCaptor.getValue().reason()).isEqualTo(AccessDecisionReason.INVALID_DEVICE_CREDENTIAL);
+        assertThat(decisionCaptor.getValue().decision()).isEqualTo(AccessDecisionOutcome.DENY);
     }
 
     @Test
@@ -92,19 +127,22 @@ class TelemetryIngestionServiceTest {
 
         assertThatThrownBy(() -> service.ingestMqttMessage(
                 "other/SENSOR-001",
-                payload(1).getBytes(StandardCharsets.UTF_8)
+                signedEnvelope(1)
         )).isInstanceOf(IllegalArgumentException.class);
 
+        verify(deviceRepository, never()).findByDeviceCodeForUpdate(any());
         verify(zeroTrustDecisionService, never()).evaluate(any());
     }
 
     @Test
-    void rejectsMessagesWithoutAPositiveSequenceNumber() {
+    void rejectsMessagesWithoutAPositiveSequenceNumberAfterSignatureVerification() {
+        Device device = device(DeviceStatus.ACTIVE);
+        when(deviceRepository.findByDeviceCodeForUpdate("SENSOR-001")).thenReturn(Optional.of(device));
         TelemetryIngestionService service = service();
 
         assertThatThrownBy(() -> service.ingestMqttMessage(
                 "iot/telemetry/SENSOR-001",
-                payload(0).getBytes(StandardCharsets.UTF_8)
+                signedEnvelope(0)
         )).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("sequence");
 
@@ -116,7 +154,17 @@ class TelemetryIngestionServiceTest {
         return new TelemetryIngestionService(
                 new ObjectMapper(),
                 zeroTrustDecisionService,
-                telemetryRepository
+                accessAuditService,
+                deviceRepository,
+                telemetryRepository,
+                messageSignatureService
+        );
+    }
+
+    private byte[] signedEnvelope(long sequence) {
+        return MqttTestMessageSigner.envelope(
+                payload(sequence).getBytes(StandardCharsets.UTF_8),
+                signingKeyPair.privateKey()
         );
     }
 
@@ -142,12 +190,13 @@ class TelemetryIngestionServiceTest {
     private Device device(DeviceStatus status) {
         UserAccount owner = new UserAccount("admin", "hash", "Administrator", UserRole.ADMIN, true);
         Device device = new Device(
-                status == DeviceStatus.BLOCKED ? "SENSOR-002" : "SENSOR-001",
+                "SENSOR-001",
                 "Test sensor",
                 DeviceType.SENSOR,
                 "192.168.10.21",
-                status == DeviceStatus.BLOCKED ? "SENSOR-002" : "SENSOR-001",
-                owner
+                "SENSOR-001",
+                owner,
+                signingKeyPair.publicKey()
         );
         device.changeStatus(status);
         return device;

@@ -79,7 +79,7 @@ All history endpoints return a stable page envelope instead of a bare array. The
 
 ## Devices
 
-Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the create request cannot assign another owner. An administrator can later transfer ownership to an enabled `USER` using the owner endpoint below. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Device code and MQTT client ID must be unique. Both are immutable after provisioning because the broker username/topic ACL and client-ID binding use them.
+Read endpoints permit roles `ADMIN` and `SECURITY_ANALYST`. Mutating endpoints require `ADMIN`. Creating a device assigns the authenticated administrator as owner; the create request cannot assign another owner. An administrator can later transfer ownership to an enabled `USER` using the owner endpoint below. New devices start `ACTIVE`. `deviceCode` is normalized to uppercase. Device code and MQTT client ID must be unique. Both are immutable after provisioning because the broker username/topic ACL and client-ID binding use them. Device read responses expose `mqttSignatureEnabled`; existing records without a signing key must be rotated before signed MQTT telemetry is accepted.
 
 ### `GET /api/devices` — `ADMIN`, `SECURITY_ANALYST`
 
@@ -103,21 +103,27 @@ Request:
 }
 ```
 
-Returns HTTP `201 Created` with safe device fields plus one-time broker credentials:
+Returns HTTP `201 Created` with safe device fields and one-time broker/signing credentials. Provisioning responses include `Cache-Control: no-store`:
 
 ```json
 {
-  "device": { "id": 3, "deviceCode": "SENSOR-003", "mqttClientId": "SENSOR-003" },
+  "device": {
+    "id": 3,
+    "deviceCode": "SENSOR-003",
+    "mqttClientId": "SENSOR-003",
+    "mqttSignatureEnabled": true
+  },
   "mqttUsername": "SENSOR-003",
-  "mqttPassword": "<random 256-bit password>"
+  "mqttPassword": "<random 256-bit password>",
+  "mqttSigningPrivateKey": "<one-time Ed25519 PKCS#8 private key, base64url>"
 }
 ```
 
-The backend provisions a Mosquitto Dynamic Security client and assigns the least-privilege device publishing role before returning. The password is not persisted by the backend and is not returned again. Types: `SENSOR`, `CAMERA`, `ACTUATOR`, `GATEWAY`.
+The backend provisions a Mosquitto Dynamic Security client and generates a per-device Ed25519 key pair before returning. It stores only the public key; the private key and MQTT password are not persisted and are never returned again. Protect and install both secrets on the device, and do not log them. Types: `SENSOR`, `CAMERA`, `ACTUATOR`, `GATEWAY`.
 
 ### `POST /api/devices/{id}/credentials/rotate` — `ADMIN`
 
-Returns HTTP `200 OK`, replaces the broker password, and returns the username/password once. The previous password becomes invalid. Use this route to provision the bootstrapped demo devices or recover a lost credential. The broker account remains enabled regardless of device status so a topic-scoped MQTT publish can reach backend status validation and be audited; a non-`ACTIVE` device's message is denied and not stored.
+Returns HTTP `200 OK` with `Cache-Control: no-store`, replaces the broker password and Ed25519 key pair, and returns the new username/password/private key once. Both previous credentials become invalid. Use this route to provision legacy or bootstrapped demo devices, rotate keys, or recover a lost credential. The broker account remains enabled regardless of device status so a topic-scoped MQTT publish can reach backend signature/status validation and be audited; a non-`ACTIVE` device's message is denied and not stored.
 
 ### `PUT /api/devices/{id}` — `ADMIN`
 
@@ -283,7 +289,7 @@ An evaluated `ALLOW` or `DENY` returns HTTP `200 OK` with decision, reason, poli
 
 ### `GET /api/access/audits` — `ADMIN`, `SECURITY_ANALYST`
 
-Returns a page of evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, optional MQTT `messageSequence`, matching-policy snapshot, and time. Supports optional `from`, `to`, `page`, `size`, `decision`, `reason`, `channel`, `action`, `deviceCode`, `requesterUsername`, and `resource` filters. Evaluated MQTT replay attempts have reason `REPLAYED_MESSAGE` and include the repeated sequence. Broker authentication/ACL failures and malformed MQTT messages rejected before policy evaluation are in Mosquitto/backend logs, not `access_audits`.
+Returns a page of evaluated access events, including requester/channel, device snapshot, resource/action, result/reason, optional MQTT `messageSequence`, matching-policy snapshot, and time. Supports optional `from`, `to`, `page`, `size`, `decision`, `reason`, `channel`, `action`, `deviceCode`, `requesterUsername`, and `resource` filters. Evaluated MQTT replay attempts have reason `REPLAYED_MESSAGE` and include the repeated sequence. Invalid Ed25519 signatures are recorded as `DENY` / `INVALID_DEVICE_CREDENTIAL` with no message sequence. Broker authentication/ACL failures and malformed envelopes rejected before evaluation are in Mosquitto/backend logs, not `access_audits`.
 
 ## Protected telemetry resource (Phases 6 and 9)
 
@@ -300,13 +306,22 @@ Decision order is requester role, registered device, `ACTIVE` status, exact poli
 
 A non-owner is denied even when the device is active and the policy matches ALLOW. For the seeded rules, an active sensor is policy-allowed (so ownership is then checked), the blocked `SENSOR-002` is denied as `DEVICE_NOT_ACTIVE`, and `CAMERA-001` is denied as `NO_MATCHING_POLICY` before ownership is considered. The JWT supplies requester identity; the path names the target device. A `DEVICE_NOT_OWNED` audit includes the matched ALLOW policy snapshot, documenting that policy alone was insufficient.
 
-## MQTT telemetry (Phase 7)
+## MQTT telemetry (Phases 7 and 18)
 
 The local Compose broker listens on loopback TLS port `8883` only. MQTT clients must trust `mosquitto/tls/ca.crt` and verify the broker hostname. No plaintext `1883` listener is configured. The backend subscriber uses a dedicated restricted account; device clients use their own broker credentials and fixed MQTT client IDs.
 
-`POST /api/devices` and `POST /api/devices/{id}/credentials/rotate` return `mqttUsername` (the uppercase `deviceCode`) and a random `mqttPassword` once. Mosquitto Dynamic Security checks username/password/client ID and assigns the device a role that can publish only to `iot/telemetry/{that username}`. The backend subscriber can subscribe/receive only on `iot/telemetry/+`. Anonymous connections, unmatched subscriptions/publishes/receives, and retained messages are disabled/denied. Broker-level authentication/ACL failures occur before backend ingestion and are not database access-audit events.
+`POST /api/devices` and `POST /api/devices/{id}/credentials/rotate` return `mqttUsername` (the uppercase `deviceCode`), a random `mqttPassword`, and a one-time `mqttSigningPrivateKey` with `Cache-Control: no-store`. The signing key is Ed25519 PKCS#8 DER encoded as base64url. PostgreSQL stores only its corresponding public key; the private key is not persisted or returned again. Mosquitto Dynamic Security checks username/password/client ID and assigns the device a role that can publish only to `iot/telemetry/{that username}`. The backend subscriber can subscribe/receive only on `iot/telemetry/+`. Anonymous connections, unmatched subscriptions/publishes/receives, and retained messages are disabled/denied. Broker-level authentication/ACL failures occur before backend ingestion and are not database access-audit events.
 
-Message body:
+The MQTT body is a signed envelope:
+
+```json
+{
+  "payload": "<unpadded-base64url-of-exact-UTF-8-telemetry-JSON-bytes>",
+  "signature": "<unpadded-base64url-Ed25519-signature>"
+}
+```
+
+The decoded `payload` has the telemetry schema:
 
 ```json
 {
@@ -318,11 +333,11 @@ Message body:
 }
 ```
 
-`sequence` is required, positive, and strictly greater than that device's last accepted sequence. The backend row-locks the device and performs the existing `ACTIVE` status and `device-telemetry` / `WRITE` policy checks before accepting a new sequence. Explicit policy DENY and no-match default DENY remain in force. A repeated/lower sequence is audited as `DENY` / `REPLAYED_MESSAGE`; it is not stored. The sequence high-water update and telemetry insert are in one transaction, and `(device_id, device_sequence)` is unique. Existing Phase 6 telemetry is assigned increasing per-device sequences by Flyway V6; start new publishers after the migrated high-water mark. `measuredAt` is optional; receive time is used when omitted. Payload size is limited to 2048 bytes.
+Each device signs the exact payload bytes with its one-time Ed25519 private key; the backend verifies them against the registered public key before parsing/authorizing the telemetry or consuming a sequence. Invalid signatures are audited as `DENY` / `INVALID_DEVICE_CREDENTIAL` with no untrusted sequence number, and do not change the high-water mark or persist telemetry. The private signing key is not stored by the backend. `sequence` is required, positive, and strictly greater than that device's last accepted sequence. The backend row-locks the device and performs the existing `ACTIVE` status and `device-telemetry` / `WRITE` policy checks before accepting a new sequence. Explicit policy DENY and no-match default DENY remain in force. A repeated/lower signed sequence is audited as `DENY` / `REPLAYED_MESSAGE`; it is not stored. The sequence high-water update and telemetry insert are in one transaction, and `(device_id, device_sequence)` is unique. Existing Phase 6 telemetry is assigned increasing per-device sequences by Flyway V6; start new publishers after the migrated high-water mark. `measuredAt` is optional; receive time is used when omitted. The decoded telemetry payload is limited to 2048 bytes; the full envelope is limited to 4096 bytes.
 
 ### `GET /api/telemetry` — `ADMIN`, `SECURITY_ANALYST`
 
-Returns the most recent 100 accepted telemetry samples, including `deviceSequence`. MQTT credential secrets are owned by Mosquitto Dynamic Security; PostgreSQL stores the current accepted sequence, not a plaintext MQTT password.
+Returns the most recent 100 accepted telemetry samples, including `deviceSequence`. Mosquitto Dynamic Security owns the broker credential verifier; PostgreSQL stores the current accepted sequence and the device's signing public key, never a plaintext MQTT password or signing private key.
 
 ## Error responses
 
@@ -340,4 +355,4 @@ Validation, authentication, authorization, and application errors use a consiste
 
 Typical status codes: `400` invalid request, `401` missing/invalid authentication or rejected login, `403` insufficient role or a DENY at the protected telemetry route, `404` missing resource, `409` duplicate/immutable identity, `429` login rate limit exceeded (includes `Retry-After`), and `500` unexpected server error. A DENY from `POST /api/access/check` is an HTTP `200` decision body. A protected resource DENY is HTTP `403` with a `ProtectedTelemetryResponse` containing the access decision and an empty telemetry array, not an `ApiError` body.
 
-Dashboard endpoints, application-level MQTT message signatures, and transparent enforcement on arbitrary IoT resources are not implemented. Phase 11 provides separate audit history for successful device-status transitions and policy mutations; Phase 16 adds a distinct, append-only history for admitted API login attempts; Phase 17 applies a bounded, process-local source-IP limiter, not a distributed production gateway.
+Dashboard endpoints and transparent enforcement on arbitrary IoT resources are not implemented. Phase 11 provides separate audit history for successful device-status transitions and policy mutations; Phase 16 adds a distinct, append-only history for admitted API login attempts; Phase 17 applies a bounded, process-local source-IP limiter, not a distributed production gateway; Phase 18 verifies per-device Ed25519 signatures on MQTT telemetry.

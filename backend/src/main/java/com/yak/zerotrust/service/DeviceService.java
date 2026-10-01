@@ -14,7 +14,9 @@ import com.yak.zerotrust.exception.DeviceConflictException;
 import com.yak.zerotrust.exception.DeviceNotFoundException;
 import com.yak.zerotrust.exception.InvalidDeviceOwnerException;
 import com.yak.zerotrust.exception.UserNotFoundException;
+import com.yak.zerotrust.mqtt.DeviceSigningKeyPair;
 import com.yak.zerotrust.mqtt.MqttDynamicSecurityService;
+import com.yak.zerotrust.mqtt.MqttMessageSignatureService;
 import com.yak.zerotrust.repository.DeviceRepository;
 import com.yak.zerotrust.repository.UserRepository;
 import org.springframework.stereotype.Service;
@@ -31,6 +33,7 @@ public class DeviceService {
     private final DeviceRepository deviceRepository;
     private final UserRepository userRepository;
     private final DeviceCredentialService deviceCredentialService;
+    private final MqttMessageSignatureService mqttMessageSignatureService;
     private final MqttDynamicSecurityService mqttDynamicSecurityService;
     private final DeviceOwnershipAuditService deviceOwnershipAuditService;
     private final DeviceStatusAuditService deviceStatusAuditService;
@@ -39,6 +42,7 @@ public class DeviceService {
             DeviceRepository deviceRepository,
             UserRepository userRepository,
             DeviceCredentialService deviceCredentialService,
+            MqttMessageSignatureService mqttMessageSignatureService,
             MqttDynamicSecurityService mqttDynamicSecurityService,
             DeviceOwnershipAuditService deviceOwnershipAuditService,
             DeviceStatusAuditService deviceStatusAuditService
@@ -46,6 +50,7 @@ public class DeviceService {
         this.deviceRepository = deviceRepository;
         this.userRepository = userRepository;
         this.deviceCredentialService = deviceCredentialService;
+        this.mqttMessageSignatureService = mqttMessageSignatureService;
         this.mqttDynamicSecurityService = mqttDynamicSecurityService;
         this.deviceOwnershipAuditService = deviceOwnershipAuditService;
         this.deviceStatusAuditService = deviceStatusAuditService;
@@ -104,32 +109,36 @@ public class DeviceService {
         UserAccount owner = userRepository.findById(ownerId)
                 .orElseThrow(UserNotFoundException::new);
         String mqttPassword = deviceCredentialService.issueMqttPassword();
+        DeviceSigningKeyPair signingKeyPair = mqttMessageSignatureService.generateKeyPair();
         Device savedDevice = deviceRepository.save(new Device(
                 deviceCode,
                 request.deviceName().trim(),
                 request.deviceType(),
                 request.ipAddress().trim(),
                 mqttClientId,
-                owner
+                owner,
+                signingKeyPair.publicKey()
         ));
         mqttDynamicSecurityService.provisionDevice(
                 savedDevice.getDeviceCode(),
                 savedDevice.getMqttClientId(),
                 mqttPassword
         );
-        return provisioningResponse(savedDevice, mqttPassword);
+        return provisioningResponse(savedDevice, mqttPassword, signingKeyPair.privateKey());
     }
 
     @Transactional
     public DeviceProvisioningResponse rotateMqttCredential(Long id) {
         Device device = findDevice(id);
         String mqttPassword = deviceCredentialService.issueMqttPassword();
+        DeviceSigningKeyPair signingKeyPair = mqttMessageSignatureService.generateKeyPair();
+        device.rotateMqttSigningPublicKey(signingKeyPair.publicKey());
         mqttDynamicSecurityService.provisionDevice(
                 device.getDeviceCode(),
                 device.getMqttClientId(),
                 mqttPassword
         );
-        return provisioningResponse(device, mqttPassword);
+        return provisioningResponse(device, mqttPassword, signingKeyPair.privateKey());
     }
 
     @Transactional
@@ -234,8 +243,17 @@ public class DeviceService {
         return deviceCode.trim().toUpperCase(Locale.ROOT);
     }
 
-    private DeviceProvisioningResponse provisioningResponse(Device device, String mqttPassword) {
-        return new DeviceProvisioningResponse(toResponse(device), device.getDeviceCode(), mqttPassword);
+    private DeviceProvisioningResponse provisioningResponse(
+            Device device,
+            String mqttPassword,
+            String mqttSigningPrivateKey
+    ) {
+        return new DeviceProvisioningResponse(
+                toResponse(device),
+                device.getDeviceCode(),
+                mqttPassword,
+                mqttSigningPrivateKey
+        );
     }
 
     private DeviceResponse toResponse(Device device) {
@@ -246,6 +264,7 @@ public class DeviceService {
                 device.getDeviceType(),
                 device.getIpAddress(),
                 device.getMqttClientId(),
+                device.getMqttSigningPublicKey() != null && !device.getMqttSigningPublicKey().isBlank(),
                 device.getStatus(),
                 device.getOwner().getId(),
                 device.getOwner().getUsername(),

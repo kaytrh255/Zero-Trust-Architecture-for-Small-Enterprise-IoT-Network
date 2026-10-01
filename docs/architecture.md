@@ -9,7 +9,7 @@ The project is a modular monolith: one Spring Boot application owns REST APIs, a
 ```text
 curl / Postman                         Simulated IoT publisher
       |                                           |
-      | HTTP + bearer JWT                         | MQTT/TLS + device username/password/client ID
+      | HTTP + bearer JWT                         | MQTT/TLS + device credentials + Ed25519 signature
       v                                           v
 Spring Boot application <====== verified TLS ======> Mosquitto :8883
   ├── AuthController / AuthService                 ├── Dynamic Security plugin
@@ -88,26 +88,27 @@ The status endpoint and device revocation flow capture the current and requested
 
 ```text
 POST /api/devices or credential rotation
-  -> generate a 256-bit random password
-  -> MqttDynamicSecurityService provisions username=deviceCode,
+  -> generate a 256-bit random password and per-device Ed25519 key pair
+  -> store only the public key; provision username=deviceCode,
      fixed mqttClientId, and a unique literal-topic role over verified TLS
-  -> disclose mqttUsername/mqttPassword once
+  -> disclose mqttUsername, mqttPassword, and signing private key once (no-store)
 
 publisher -> verified TLS + unique device credentials -> broker ACL
   -> only iot/telemetry/{same username} publish permitted
   -> Paho backend subscriber (separate restricted broker account)
-  -> validate topic/payload and require positive sequence
-  -> lock device row -> device status -> explicit policy DENY/default DENY
+  -> validate envelope, lock device row, verify signature over exact payload bytes
+  -> invalid signature: INVALID_DEVICE_CREDENTIAL audit; stop before trusting sequence
+  -> parse signed telemetry -> device status -> explicit policy DENY/default DENY
   -> reject sequence <= last accepted sequence, otherwise advance high-water mark
   -> audit decision; store telemetry only after ALLOW
 ```
 
 Mosquitto Dynamic Security denies anonymous clients and keeps publishing/subscribing denied unless an ACL grants it. The backend creates a unique device role with one literal `publishClientSend iot/telemetry/{deviceCode}` ACL, so a device cannot publish to another device's topic. The backend subscriber has a separate role for `iot/telemetry/+`; it does not use the administrative broker identity. The admin account is used only for provisioning and bootstrap. Broker accounts stay enabled across device-status changes so valid, topic-scoped publishes reach the backend and an inactive-device decision can be audited; non-active data is never persisted. Device code and MQTT client ID are immutable after provisioning so the broker identity/ACL binding cannot silently drift.
 
-The telemetry body no longer contains an authentication secret. It contains a positive, monotonically increasing per-device `sequence`, metric, value, unit, and optional `measuredAt`. The row lock serializes concurrent checks, `last_mqtt_sequence` is advanced in the same transaction as the access audit and telemetry insert, and a unique `(device_id, device_sequence)` constraint is a second replay/duplicate guard. A repeated or lower sequence receives `DENY` / `REPLAYED_MESSAGE`; policy DENY and inactive-device checks remain in force.
+The MQTT wire body is a JSON envelope with unpadded-base64url `payload` and `signature` fields. `payload` decodes to the telemetry JSON bytes containing positive per-device `sequence`, metric, value, unit, and optional `measuredAt`; Ed25519 signs those exact bytes. Each API-provisioned device receives a key pair, the database stores only its public key, and the private key is returned once with `Cache-Control: no-store`. Signature verification occurs before policy/replay evaluation and before trusting telemetry fields. Invalid signatures are audited as `DENY` / `INVALID_DEVICE_CREDENTIAL`, carry no untrusted sequence, and do not update the sequence high-water mark or persist telemetry. The row lock serializes signature-key rotation and sequence checks; `last_mqtt_sequence` is advanced in the same transaction as the access audit and telemetry insert, and a unique `(device_id, device_sequence)` constraint is a second replay/duplicate guard. A repeated or lower sequence receives `DENY` / `REPLAYED_MESSAGE`; policy DENY and inactive-device checks remain in force.
 
-Mosquitto authenticates the MQTT username and assigns that device a role with a literal ACL for its registered topic. HTTP device ownership applies only to the protected telemetry read route; MQTT ingestion remains governed by broker identity/ACLs, status, policy, and replay checks. The prototype does not verify application-level message signatures.
+Mosquitto authenticates the MQTT username and assigns that device a role with a literal ACL for its registered topic. HTTP device ownership applies only to the protected telemetry read route; MQTT ingestion remains governed by broker identity/ACLs, application signature, status, policy, and replay checks. Older device records without a public key must have credentials rotated before they can send signed telemetry.
 
 ## Persistence
 
-Flyway migrations `V1__create_users.sql` through `V11__audit_authentication_attempts.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed access-audit reasons; V8 creates the separate ownership-transfer history table; V9 adds separate status-transition and policy-change history tables with actor references and history indexes; V10 installs database triggers that reject UPDATE and DELETE statements on the four business audit-history tables; V11 adds a separate append-only table for validated API login attempts. Device ownership itself remains in `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically. Phase 14 configures a DML-only runtime role and a separate DDL-capable migration role. Phase 15 runs Flyway in a dedicated one-shot `db-migrate` container rather than Spring Boot; its migration credentials are not passed to the backend, and backend startup waits for migrations to complete. Phase 17 applies a bounded in-memory source-IP login limiter before password verification. Compose's idempotent `db-roles-init` transfers `public` schema/table/sequence/view and audit-function ownership to the migration role before migration/backend startup, including on an existing volume; the runtime role receives only application DML and cannot disable/drop the append-only triggers.
+Flyway migrations `V1__create_users.sql` through `V12__add_device_mqtt_signing_keys.sql` define the schema and demo rules. V4 adds access audits and telemetry; V5 temporarily added application credential hashes; V6 removes that redundant hash, adds the per-device sequence/high-water mark and replay audit reason, and assigns sequences to existing telemetry rows during upgrade; V7 adds `DEVICE_NOT_OWNED` to the allowed access-audit reasons; V8 creates the separate ownership-transfer history table; V9 adds separate status-transition and policy-change history tables with actor references and history indexes; V10 installs database triggers that reject UPDATE and DELETE statements on the four business audit-history tables; V11 adds a separate append-only table for validated API login attempts; V12 adds the nullable per-device MQTT signing public key so existing volumes can upgrade without losing data. Device ownership itself remains in `devices.owner_id`. Hibernate uses `ddl-auto: validate`; it does not create tables automatically. Phase 14 configures a DML-only runtime role and a separate DDL-capable migration role. Phase 15 runs Flyway in a dedicated one-shot `db-migrate` container rather than Spring Boot; its migration credentials are not passed to the backend, and backend startup waits for migrations to complete. Phase 17 applies a bounded in-memory source-IP login limiter before password verification; Phase 18 verifies Ed25519 telemetry signatures before policy/replay evaluation. Compose's idempotent `db-roles-init` transfers `public` schema/table/sequence/view and audit-function ownership to the migration role before migration/backend startup, including on an existing volume; the runtime role receives only application DML and cannot disable/drop the append-only triggers.

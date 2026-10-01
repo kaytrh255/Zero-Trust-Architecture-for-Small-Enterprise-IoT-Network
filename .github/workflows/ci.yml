@@ -1,4 +1,4 @@
-name: Build and Compose integration (Phase 17)
+name: Build and Compose integration (Phase 18)
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: phase17-ci-${{ github.ref }}
+  group: phase18-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -73,7 +73,7 @@ jobs:
             | grep -Ei 'not author|denied|error|iot/telemetry|dynsec' || true
           exit 1
 
-      - name: Run Phase 10 and 12 Compose integration test
+      - name: Run Phase 10, 12, and 18 Compose integration test
         working-directory: backend
         env:
           PHASE10_INTEGRATION: 'true'

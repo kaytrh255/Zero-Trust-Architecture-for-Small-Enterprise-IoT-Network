@@ -43,6 +43,9 @@ public class Device {
     @Column(name = "mqtt_client_id", nullable = false, length = 100)
     private String mqttClientId;
 
+    @Column(name = "mqtt_signing_public_key", length = 128)
+    private String mqttSigningPublicKey;
+
     @Column(name = "last_mqtt_sequence", nullable = false)
     private long lastMqttSequence;
 
@@ -71,11 +74,24 @@ public class Device {
             String mqttClientId,
             UserAccount owner
     ) {
+        this(deviceCode, deviceName, deviceType, ipAddress, mqttClientId, owner, null);
+    }
+
+    public Device(
+            String deviceCode,
+            String deviceName,
+            DeviceType deviceType,
+            String ipAddress,
+            String mqttClientId,
+            UserAccount owner,
+            String mqttSigningPublicKey
+    ) {
         this.deviceCode = deviceCode;
         this.deviceName = deviceName;
         this.deviceType = deviceType;
         this.ipAddress = ipAddress;
         this.mqttClientId = mqttClientId;
+        this.mqttSigningPublicKey = mqttSigningPublicKey;
         this.status = DeviceStatus.ACTIVE;
         this.owner = owner;
     }
@@ -107,6 +123,13 @@ public class Device {
 
     public void changeOwner(UserAccount owner) {
         this.owner = owner;
+    }
+
+    public void rotateMqttSigningPublicKey(String mqttSigningPublicKey) {
+        if (mqttSigningPublicKey == null || mqttSigningPublicKey.isBlank()) {
+            throw new IllegalArgumentException("MQTT signing public key is required");
+        }
+        this.mqttSigningPublicKey = mqttSigningPublicKey;
     }
 
     public void recordMqttSequence(long sequence) {
@@ -142,6 +165,10 @@ public class Device {
 
     public String getMqttClientId() {
         return mqttClientId;
+    }
+
+    public String getMqttSigningPublicKey() {
+        return mqttSigningPublicKey;
     }
 
     public long getLastMqttSequence() {
