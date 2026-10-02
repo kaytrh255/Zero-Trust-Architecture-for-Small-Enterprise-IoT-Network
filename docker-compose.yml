@@ -1,0 +1,173 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zerotrust}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Copy .env.example to .env and set POSTGRES_ADMIN_PASSWORD}
+      DB_USERNAME: ${DB_USERNAME:?Copy .env.example to .env and set DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD:?Copy .env.example to .env and set DB_PASSWORD}
+      DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME:?Set DB_MIGRATION_USERNAME in .env}
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:?Set DB_MIGRATION_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  db-roles-init:
+    image: postgres:16-alpine
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zerotrust}
+      POSTGRES_USER: postgres
+      POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Set POSTGRES_ADMIN_PASSWORD in .env}
+      DB_USERNAME: ${DB_USERNAME:?Set DB_USERNAME in .env}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      DB_MIGRATION_USERNAME: ${DB_MIGRATION_USERNAME:?Set DB_MIGRATION_USERNAME in .env}
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:?Set DB_MIGRATION_PASSWORD in .env}
+    volumes:
+      - ./postgres/scripts/bootstrap-db-roles.sh:/scripts/bootstrap-db-roles.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/bootstrap-db-roles.sh"]
+
+  db-migrate:
+    image: flyway/flyway:13.8.1-alpine
+    restart: "no"
+    depends_on:
+      db-roles-init:
+        condition: service_completed_successfully
+    environment:
+      FLYWAY_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-zerotrust}
+      FLYWAY_USER: ${DB_MIGRATION_USERNAME:?Set DB_MIGRATION_USERNAME in .env}
+      FLYWAY_PASSWORD: ${DB_MIGRATION_PASSWORD:?Set DB_MIGRATION_PASSWORD in .env}
+      FLYWAY_SCHEMAS: public
+      FLYWAY_DEFAULT_SCHEMA: public
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+      FLYWAY_CONNECT_RETRIES: 20
+    volumes:
+      - ./backend/src/main/resources/db/migration:/flyway/sql:ro
+    command: ["migrate"]
+
+  mqtt-init:
+    image: zerotrust-mosquitto:2.0.22
+    build:
+      context: ./mosquitto
+      dockerfile: Dockerfile
+    restart: "no"
+    user: "0:0"
+    environment:
+      MQTT_DYNSEC_ADMIN_USERNAME: ${MQTT_DYNSEC_ADMIN_USERNAME:-admin}
+      MQTT_DYNSEC_ADMIN_PASSWORD: ${MQTT_DYNSEC_ADMIN_PASSWORD:?Set MQTT_DYNSEC_ADMIN_PASSWORD in .env}
+    volumes:
+      - mosquitto_data:/mosquitto/data
+      - ./mosquitto/tls:/mosquitto/tls
+      - ./mosquitto/scripts/init-broker.sh:/mosquitto/scripts/init-broker.sh:ro
+    entrypoint: ["/bin/sh", "/mosquitto/scripts/init-broker.sh"]
+
+  mosquitto:
+    image: zerotrust-mosquitto:2.0.22
+    build:
+      context: ./mosquitto
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      mqtt-init:
+        condition: service_completed_successfully
+    environment:
+      MQTT_DYNSEC_ADMIN_USERNAME: ${MQTT_DYNSEC_ADMIN_USERNAME:-admin}
+      MQTT_DYNSEC_ADMIN_PASSWORD: ${MQTT_DYNSEC_ADMIN_PASSWORD:?Set MQTT_DYNSEC_ADMIN_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${MQTT_PORT:-8883}:8883"
+    volumes:
+      - mosquitto_data:/mosquitto/data
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/tls:/mosquitto/tls:ro
+    command: ["mosquitto", "-c", "/mosquitto/config/mosquitto.conf"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mosquitto_pub --cafile /mosquitto/tls/ca.crt -h 127.0.0.1 -p 8883 -u \"$$MQTT_DYNSEC_ADMIN_USERNAME\" -P \"$$MQTT_DYNSEC_ADMIN_PASSWORD\" -t '$$CONTROL/dynamic-security/v1' -m '{\"commands\":[{\"command\":\"getDefaultACLAccess\"}]}'"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  mqtt-bootstrap:
+    image: zerotrust-mosquitto:2.0.22
+    restart: "no"
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    environment:
+      MQTT_DYNSEC_ADMIN_USERNAME: ${MQTT_DYNSEC_ADMIN_USERNAME:-admin}
+      MQTT_DYNSEC_ADMIN_PASSWORD: ${MQTT_DYNSEC_ADMIN_PASSWORD:?Set MQTT_DYNSEC_ADMIN_PASSWORD in .env}
+      MQTT_BACKEND_USERNAME: ${MQTT_BACKEND_USERNAME:-zero-trust-backend}
+      MQTT_BACKEND_PASSWORD: ${MQTT_BACKEND_PASSWORD:?Set MQTT_BACKEND_PASSWORD in .env}
+    volumes:
+      - ./mosquitto/tls:/mosquitto/tls:ro
+      - ./mosquitto/scripts/bootstrap-security.sh:/mosquitto/scripts/bootstrap-security.sh:ro
+    entrypoint: ["/bin/sh", "/mosquitto/scripts/bootstrap-security.sh"]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db-migrate:
+        condition: service_completed_successfully
+      mqtt-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: 8080
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-zerotrust}
+      DB_USERNAME: ${DB_USERNAME:?Copy .env.example to .env and set DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD:?Copy .env.example to .env and set DB_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      JWT_EXPIRATION_SECONDS: ${JWT_EXPIRATION_SECONDS:-3600}
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:?Set MFA_ENCRYPTION_KEY in .env}
+      MFA_REQUIRE_PRIVILEGED: ${MFA_REQUIRE_PRIVILEGED:-true}
+      AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS: ${AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS:-20}
+      AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS: ${AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}
+      AUTH_LOGIN_RATE_LIMIT_MAX_TRACKED_CLIENTS: ${AUTH_LOGIN_RATE_LIMIT_MAX_TRACKED_CLIENTS:-10000}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_FULL_NAME: ${ADMIN_FULL_NAME:-Zero Trust Administrator}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      MQTT_BROKER_URL: ssl://mosquitto:8883
+      MQTT_BACKEND_USERNAME: ${MQTT_BACKEND_USERNAME:-zero-trust-backend}
+      MQTT_BACKEND_PASSWORD: ${MQTT_BACKEND_PASSWORD:?Set MQTT_BACKEND_PASSWORD in .env}
+      MQTT_DYNSEC_ADMIN_USERNAME: ${MQTT_DYNSEC_ADMIN_USERNAME:-admin}
+      MQTT_DYNSEC_ADMIN_PASSWORD: ${MQTT_DYNSEC_ADMIN_PASSWORD:?Set MQTT_DYNSEC_ADMIN_PASSWORD in .env}
+      MQTT_CA_FILE: /mosquitto/tls/ca.crt
+      MQTT_CLIENT_ID: ${MQTT_CLIENT_ID:-zero-trust-backend}
+      MQTT_TELEMETRY_TOPIC: ${MQTT_TELEMETRY_TOPIC:-iot/telemetry/+}
+    volumes:
+      - ./mosquitto/tls:/mosquitto/tls:ro
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8080}:8080"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-3000}:80"
+
+volumes:
+  postgres_data:
+  mosquitto_data:

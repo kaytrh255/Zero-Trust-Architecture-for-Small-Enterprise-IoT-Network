@@ -1,0 +1,58 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: zero-trust-backend
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/zerotrust}
+    username: ${DB_USERNAME:zerotrust}
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: false
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+
+security:
+  jwt:
+    secret: ${JWT_SECRET}
+    expiration-seconds: ${JWT_EXPIRATION_SECONDS:3600}
+  login-rate-limit:
+    max-attempts: ${AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS:20}
+    window-seconds: ${AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS:60}
+    max-tracked-clients: ${AUTH_LOGIN_RATE_LIMIT_MAX_TRACKED_CLIENTS:10000}
+  mfa:
+    encryption-key: ${MFA_ENCRYPTION_KEY}
+    require-privileged: ${MFA_REQUIRE_PRIVILEGED:true}
+
+app:
+  bootstrap:
+    admin:
+      username: ${ADMIN_USERNAME:admin}
+      full-name: ${ADMIN_FULL_NAME:Zero Trust Administrator}
+      password: ${ADMIN_PASSWORD}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-components: always
+      show-details: never
+
+mqtt:
+  broker-url: ${MQTT_BROKER_URL:ssl://localhost:8883}
+  username: ${MQTT_BACKEND_USERNAME:}
+  password: ${MQTT_BACKEND_PASSWORD:}
+  ca-file: ${MQTT_CA_FILE:mosquitto/tls/ca.crt}
+  client-id: ${MQTT_CLIENT_ID:zero-trust-backend}
+  telemetry-topic: ${MQTT_TELEMETRY_TOPIC:iot/telemetry/+}
+  dynamic-security:
+    username: ${MQTT_DYNSEC_ADMIN_USERNAME:admin}
+    password: ${MQTT_DYNSEC_ADMIN_PASSWORD:}
