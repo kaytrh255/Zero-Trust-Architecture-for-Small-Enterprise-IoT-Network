@@ -17,6 +17,8 @@ public final class UserPrincipal implements UserDetails {
     private final String fullName;
     private final UserRole role;
     private final boolean enabled;
+    private final boolean mfaEnabled;
+    private final int mfaAuthVersion;
 
     public UserPrincipal(UserAccount user) {
         this.id = user.getId();
@@ -25,6 +27,8 @@ public final class UserPrincipal implements UserDetails {
         this.fullName = user.getFullName();
         this.role = user.getRole();
         this.enabled = user.isEnabled();
+        this.mfaEnabled = user.isMfaEnabled();
+        this.mfaAuthVersion = user.getMfaAuthVersion();
     }
 
     @Override
@@ -72,5 +76,13 @@ public final class UserPrincipal implements UserDetails {
 
     public UserRole getRole() {
         return role;
+    }
+
+    public boolean isMfaEnabled() {
+        return mfaEnabled;
+    }
+
+    public int getMfaAuthVersion() {
+        return mfaAuthVersion;
     }
 }

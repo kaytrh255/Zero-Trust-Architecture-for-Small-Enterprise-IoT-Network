@@ -23,10 +23,16 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtService jwtService;
     private final JpaUserDetailsService userDetailsService;
+    private final MfaEnforcementPolicy mfaEnforcementPolicy;
 
-    public JwtAuthenticationFilter(JwtService jwtService, JpaUserDetailsService userDetailsService) {
+    public JwtAuthenticationFilter(
+            JwtService jwtService,
+            JpaUserDetailsService userDetailsService,
+            MfaEnforcementPolicy mfaEnforcementPolicy
+    ) {
         this.jwtService = jwtService;
         this.userDetailsService = userDetailsService;
+        this.mfaEnforcementPolicy = mfaEnforcementPolicy;
     }
 
     @Override
@@ -46,7 +52,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             String username = jwtService.extractUsername(token);
             if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
                 UserDetails userDetails = userDetailsService.loadUserByUsername(username);
-                if (userDetails.isEnabled() && jwtService.isTokenValid(token, userDetails)) {
+                boolean missingRequiredMfa = userDetails instanceof UserPrincipal principal
+                        && mfaEnforcementPolicy.requiresEnrollment(principal);
+                if (userDetails.isEnabled() && !missingRequiredMfa && jwtService.isTokenValid(token, userDetails)) {
                     UsernamePasswordAuthenticationToken authentication =
                             new UsernamePasswordAuthenticationToken(
                                     userDetails,

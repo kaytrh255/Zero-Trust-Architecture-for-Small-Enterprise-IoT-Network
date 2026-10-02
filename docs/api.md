@@ -1,6 +1,6 @@
 # API specification (implemented endpoints)
 
-Base URL for local Compose: `http://localhost:8080`. JSON is used for request and response bodies. Health, registration, and login are public. All other routes require a bearer token.
+Base URL for local Compose: `http://localhost:8080`. JSON is used for request and response bodies. Health, registration, login, and MFA challenge/enrollment endpoints are reachable without a bearer token; required enrollment operations validate a short-lived purpose-restricted token in the request body. Other protected routes require a normal bearer access token.
 
 ## Health
 
@@ -37,7 +37,83 @@ Request:
 }
 ```
 
-Successful response: HTTP `200 OK` with `accessToken`, `tokenType` (`Bearer`), `expiresInSeconds`, and a safe user profile. Wrong credentials return `401 Unauthorized` with a generic message. Login requests admitted to authentication are recorded separately in authentication-attempt history; the audit stores no password, token, or client IP. By default, one socket peer may make 20 login requests per 60-second fixed window; `AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS` configure the limit. Excess requests return `429 Too Many Requests` with a `Retry-After` header before password verification and do not create audit rows. Client IPs are used transiently by the in-memory limiter, not persisted in the audit table.
+Successful response: HTTP `200 OK` with `accessToken`, `tokenType` (`Bearer`), `expiresInSeconds`, and a safe user profile. Wrong credentials return `401 Unauthorized` with a generic message. Login requests admitted to authentication are recorded separately in authentication-attempt history; the audit stores no password, token, or client IP. By default, one socket peer has a shared budget of 20 authentication/security attempts per 60-second fixed window; `AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS` configure it. The limiter covers login and MFA verification, enrollment setup/confirmation, disable, recovery-code rotation, and admin-assisted MFA recovery. Excess requests return `429 Too Many Requests` with `Retry-After` and error code `AUTH_RATE_LIMITED` before password/TOTP verification or mutation; rejected requests do not create login audit rows. Client IPs are used transiently by the process-local limiter and are not persisted.
+
+### MFA login and required-enrollment challenges — public
+
+The `POST /api/auth/login` response varies by account and the `MFA_REQUIRE_PRIVILEGED` policy, which defaults to `true`:
+
+- With no applicable MFA requirement, the response includes a normal `accessToken`.
+- An account that already has MFA receives `mfaRequired: true`, a five-minute `mfaToken`, and no access token. Complete it with `POST /api/auth/mfa/verify` using `{ "mfaToken": "…", "code": "123456" }` or a recovery code.
+- An ADMIN or SECURITY_ANALYST without MFA receives `mfaEnrollmentRequired: true`, a ten-minute `enrollmentToken`, and no access token. The token is rejected as a bearer credential and by the regular MFA-login verification endpoint.
+
+When mandatory enrollment is required, start setup using:
+
+```http
+POST /api/auth/mfa/required-enrollment
+Content-Type: application/json
+
+{"enrollmentToken":"…"}
+```
+
+The `200` response contains the Base32 `secret`, `otpauthUri`, and `expiresAt`, and uses `Cache-Control: no-store`. This challenge grants access only to the required-enrollment setup and confirmation operations. Confirm the authenticator with:
+
+```http
+POST /api/auth/mfa/required-enrollment/confirm
+Content-Type: application/json
+
+{"enrollmentToken":"…","code":"123456"}
+```
+
+A successful `200` response contains a `session` with the first regular `accessToken` and ten one-time `recoveryCodes`. The enrollment challenge is consumed; protect the recovery codes because the API will not display them again. Both enrollment operations are rate-limited and marked `no-store`. Setting `MFA_REQUIRE_PRIVILEGED=false` preserves optional MFA for ADMIN and SECURITY_ANALYST accounts, while accounts that have enabled MFA still use the second-factor login challenge. USER accounts are not subject to privileged-MFA enforcement.
+
+### `POST /api/auth/mfa/recovery-codes/rotate` — authenticated `ADMIN`, `SECURITY_ANALYST` (Phase 23)
+
+Request:
+
+```json
+{"password":"current account password","code":"123456"}
+```
+
+Requires enabled MFA, the account password, and a fresh unused TOTP code. It atomically invalidates all existing recovery codes and returns ten replacements plus the current MFA status with `Cache-Control: no-store`. The TOTP counter is advanced, preventing the code from being reused for another rotation. Rotating codes does not revoke the current access token; it does create an append-only `RECOVERY_CODES_ROTATED` MFA audit event. Invalid credentials or a replayed/expired code return HTTP `400`; non-privileged callers are forbidden.
+
+Successful response (`recoveryCodes` is returned only once):
+
+```json
+{
+  "recoveryCodes": ["1A2B-3C4D-…"],
+  "status": {
+    "enabled": true,
+    "enrollmentPending": false,
+    "enrollmentExpiresAt": null,
+    "recoveryCodesRemaining": 10
+  }
+}
+```
+
+### `POST /api/auth/mfa/disable/recovery-code` — authenticated `ADMIN`, `SECURITY_ANALYST` (Phase 25)
+
+Request:
+
+```json
+{"password":"current account password","recoveryCode":"ABCD-EF01-…"}
+```
+
+Recovery option for an account that has lost its authenticator. It requires the account password and an unused recovery code; a code already consumed during sign-in cannot be reused. On success, the submitted code is consumed, all recovery codes are invalidated, MFA is disabled, and the MFA-auth version is incremented to revoke every existing access token. The `200` response returns the disabled MFA status with `Cache-Control: no-store`; audit events `RECOVERY_CODE_USED` and `DISABLED` are appended atomically. Under `MFA_REQUIRE_PRIVILEGED=true`, the next password sign-in creates a required-enrollment challenge. Invalid credentials or a used/invalid code return `400`; the shared per-peer limiter can return `429 AUTH_RATE_LIMITED` with `Retry-After`.
+
+### `POST /api/admin/mfa/recovery` — authenticated `ADMIN` (Phase 26)
+
+Request:
+
+```json
+{"targetUsername":"analyst1","password":"acting administrator password","code":"123456"}
+```
+
+The actor must be a different enabled ADMIN with MFA enabled and must prove their own password plus a fresh, unused six-digit TOTP code. The target must be another enabled ADMIN or SECURITY_ANALYST with MFA enabled. A successful request atomically advances the actor’s TOTP counter, disables the target’s MFA, deletes the target’s recovery-code hashes and pending login/enrollment challenges, increments the target MFA-auth version to revoke existing tokens, and appends an `ADMIN_MFA_RECOVERY` event naming both actor and target. It generates or returns no MFA secret or recovery codes. The disabled status response is `Cache-Control: no-store`; `MFA_REQUIRE_PRIVILEGED=true` requires fresh enrollment at the target’s next password sign-in. Self-recovery, invalid proofs, and ineligible targets return HTTP `400`; callers without ADMIN permission receive `403`, and the shared peer limiter can return `429 AUTH_RATE_LIMITED` with `Retry-After`.
+
+### `GET /api/auth/mfa/audits` — authenticated `ADMIN`, `SECURITY_ANALYST` (Phases 21, 26)
+
+Returns the append-only MFA security history in the common page envelope, newest first. Optional filters are `page`, `size`, inclusive `from` / `to`, `operation` (including `ADMIN_MFA_RECOVERY`), and target `username`. Responses use `Cache-Control: no-store`. Each item includes target `userId` / `username` and, for new events, `actorUserId` / `actorUsername`; legacy rows may have null actor fields. The UI marks the actor when it differs from the target.
 
 ### `GET /api/auth/me` — authenticated
 

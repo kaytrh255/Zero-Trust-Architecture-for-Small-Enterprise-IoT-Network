@@ -25,6 +25,12 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 18:** sign MQTT telemetry with a per-device Ed25519 key; the backend verifies signatures before policy/replay evaluation and auditing.
 - **Phase 19:** a responsive React/TypeScript control plane for device provisioning, policy management, access/login history, telemetry, and the USER-owned protected telemetry route.
 - **Phase 20:** append-only auditing for device credential provisioning and rotation, with actor/timestamp snapshots and SHA-256 public-key fingerprints; MQTT passwords and signing private keys are never written to the audit history.
+- **Phase 21:** optional TOTP MFA for ADMIN and SECURITY_ANALYST accounts, encrypted authenticator seeds, one-use recovery codes, single-use short-lived login challenges, token revocation on MFA changes, and append-only MFA security history.
+- **Phase 22:** configurable mandatory MFA for privileged accounts (`MFA_REQUIRE_PRIVILEGED`, enabled by default); accounts without MFA receive a ten-minute enrollment-only challenge and no access token until TOTP setup is confirmed.
+- **Phase 23:** privileged users can rotate one-time recovery codes after confirming their password and a fresh TOTP code; old codes are invalidated atomically and the rotation is appended to MFA security history.
+- **Phase 24:** throttle authenticated MFA-management proofs with the bounded per-peer authentication limiter, including enrollment confirmation, disable, and recovery-code rotation.
+- **Phase 25:** let a privileged user who lost their authenticator disable MFA with their password and one unused recovery code; consume the code, invalidate the rest, revoke all sessions, and audit the recovery.
+- **Phase 26:** let a different, MFA-enabled ADMIN recover an enabled ADMIN or SECURITY_ANALYST using the actor’s password and fresh TOTP; atomically clear the target’s MFA factors/challenges, revoke tokens, and audit both identities.
 
 The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. The web console is a role-aware client for the existing APIs; server-side authorization remains authoritative. There is no physical-device deployment.
 
@@ -45,13 +51,14 @@ From the repository root, create a local environment file if you do not already 
 cp .env.example .env
 ```
 
-Set a JWT signing key in `.env`:
+Generate a JWT signing key and an independent MFA-encryption key in `.env`:
 
 ```bash
 openssl rand -base64 32
+openssl rand -base64 32
 ```
 
-Put the generated value after `JWT_SECRET=`. Replace the sample application-runtime, database-admin, database-migration, Dynamic Security administrator, and backend MQTT passwords before using the demo; keep all three PostgreSQL passwords distinct. Keep `.env` private; Git ignores it. Existing `.env` files must add `DB_MIGRATION_USERNAME` and `DB_MIGRATION_PASSWORD` (and the Phase 7 `MQTT_DYNSEC_ADMIN_USERNAME`, `MQTT_DYNSEC_ADMIN_PASSWORD`, `MQTT_BACKEND_USERNAME`, and `MQTT_BACKEND_PASSWORD` values); the old shared `MQTT_USERNAME` / `MQTT_PASSWORD` settings are no longer used. For an existing PostgreSQL volume, keep `POSTGRES_ADMIN_PASSWORD` set to the password that currently authenticates the stored `postgres` administrator; Compose does not rotate an initialized volume's administrator password just because `.env` changed.
+Put the first generated value after `JWT_SECRET=` and the second after `MFA_ENCRYPTION_KEY=`. Keep `MFA_ENCRYPTION_KEY` stable and backed up securely: losing it makes enrolled TOTP seeds undecryptable; rotating it requires a planned re-enrollment. `MFA_REQUIRE_PRIVILEGED` defaults to `true`; set it to `false` only when you want Phase 21's optional MFA behavior instead of requiring ADMIN and SECURITY_ANALYST enrollment before issuing access tokens. Replace the sample application-runtime, database-admin, database-migration, Dynamic Security administrator, and backend MQTT passwords before using the demo; keep all three PostgreSQL passwords distinct. Keep `.env` private; Git ignores it. Existing `.env` files must add `DB_MIGRATION_USERNAME`, `DB_MIGRATION_PASSWORD`, `MFA_ENCRYPTION_KEY`, and `MFA_REQUIRE_PRIVILEGED` (and the Phase 7 `MQTT_DYNSEC_ADMIN_USERNAME`, `MQTT_DYNSEC_ADMIN_PASSWORD`, `MQTT_BACKEND_USERNAME`, and `MQTT_BACKEND_PASSWORD` values); the old shared `MQTT_USERNAME` / `MQTT_PASSWORD` settings are no longer used. For an existing PostgreSQL volume, keep `POSTGRES_ADMIN_PASSWORD` set to the password that currently authenticates the stored `postgres` administrator; Compose does not rotate an initialized volume's administrator password just because `.env` changed.
 
 Start or rebuild the services:
 
@@ -60,7 +67,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Compose runs PostgreSQL, an idempotent `db-roles-init` step, a separate one-shot Flyway `db-migrate` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, the backend API, and a static React frontend served by Nginx. `db-roles-init`, `db-migrate`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. The separate `db-migrate` Flyway CLI service uses `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; the backend receives only `DB_USERNAME` / `DB_PASSWORD` for runtime DML and does not receive migration credentials. Flyway creates/updates users, devices, policies, authentication/access/ownership/status/policy-change/credential-lifecycle audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history; V12 adds the nullable per-device MQTT signing public key; V13 adds append-only device credential lifecycle history containing public-key fingerprints only. The generated CA, broker certificate, and TLS private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
+Compose runs PostgreSQL, an idempotent `db-roles-init` step, a separate one-shot Flyway `db-migrate` step, local TLS/Dynamic Security initialization, the loopback-bound Mosquitto TLS broker, a broker-role bootstrap step, the backend API, and a static React frontend served by Nginx. `db-roles-init`, `db-migrate`, `mqtt-init`, and `mqtt-bootstrap` are one-shot setup services and should finish with exit code `0`. Compose orders database role bootstrapping after PostgreSQL is healthy and before backend startup; the one-shot step runs again when the stack is recreated. It creates/reconciles the runtime and migration logins and transfers existing `public` schema, application table/sequence/view, and audit-trigger-function ownership to the migration role in place. Do not delete `postgres_data` to apply this upgrade. The separate `db-migrate` Flyway CLI service uses `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; the backend receives only `DB_USERNAME` / `DB_PASSWORD` for runtime DML and does not receive migration credentials. Flyway creates/updates users, devices, policies, authentication/access/ownership/status/policy-change/credential-lifecycle audit history, and telemetry. Migration V6 assigns an initial per-device sequence to existing Phase 6 telemetry; V9 adds device-status and policy-mutation audit tables; V10 makes the four business audit histories append-only; V11 adds append-only authentication-attempt history; V12 adds the nullable per-device MQTT signing public key; V13 adds append-only device credential lifecycle history containing public-key fingerprints only; V14 adds encrypted TOTP MFA configuration, one-use recovery-code hashes, short-lived login challenges, and append-only MFA security history; V15 distinguishes login challenges from required-enrollment challenges; V16 allows MFA audit history to record recovery-code rotation; V17 adds actor snapshots and the admin-assisted MFA recovery audit operation. `MFA_ENCRYPTION_KEY` is injected only into the backend and must remain stable and backed up. `MFA_REQUIRE_PRIVILEGED` is injected only into the backend and defaults to `true`. The generated CA, broker certificate, and TLS private keys are stored under ignored `mosquitto/tls/`; `ca.crt` is the public trust certificate and `ca.key` must remain private.
 
 Check the backend and database:
 
@@ -74,7 +81,7 @@ A successful response has HTTP `200`, overall `"status":"UP"`, and a database co
 
 Open `http://localhost:3000` and sign in with the bootstrap administrator or a registered account. `ADMIN` can provision devices, rotate one-time MQTT/signing credentials, change status/ownership, and manage policies. `SECURITY_ANALYST` can review device posture, policies, telemetry, and audit history. A `USER` gets only the protected telemetry reader; the backend checks policy and device ownership before returning samples. User registration always creates a `USER` account, never an administrator.
 
-The console calls the existing REST API through a same-origin proxy, so CORS is not enabled. JWTs are kept in React memory only (not local/session storage) and are cleared on sign-out or tab reload. Device MQTT passwords and Ed25519 private keys appear only in the one-time provisioning/rotation dialog; copy them into the device secret store before closing it. Role-based navigation is only a usability layer—the backend remains the authorization boundary.
+The console calls the existing REST API through a same-origin proxy, so CORS is not enabled. JWTs are kept in React memory only (not local/session storage) and are cleared on sign-out or tab reload. Device MQTT passwords and Ed25519 private keys appear only in the one-time provisioning/rotation dialog; copy them into the device secret store before closing it. Privileged accounts can configure TOTP in **Account security**; recovery codes are displayed once, and enabling/disabling MFA signs out existing sessions. With the default `MFA_REQUIRE_PRIVILEGED=true`, a privileged account that has not enrolled must complete a restricted setup flow at sign-in before it receives an access token; set the option to `false` for optional MFA. Role-based navigation is only a usability layer—the backend remains the authorization boundary.
 
 For frontend development outside Compose, start the API stack, then run:
 
@@ -446,7 +453,7 @@ New API-provisioned devices receive an Ed25519 key pair. The database stores onl
 
 The MQTT body is an envelope with unpadded-base64url `payload` and `signature` fields. The decoded `payload` is the exact UTF-8 telemetry JSON byte sequence, and the signature is Ed25519 over those exact bytes. The backend locks the device, verifies the signature against the key bound to the topic's device identity, then parses the payload and applies status, policy, and replay checks. A bad signature is audited as `DENY` / `INVALID_DEVICE_CREDENTIAL`, with no untrusted sequence; it cannot consume the high-water mark or persist telemetry. The signed payload remains capped at 2048 bytes and the full envelope at 4096 bytes.
 
-`Phase10ComposeIntegrationTest` exercises a valid signed publish and modifies signed telemetry bytes to verify rejection. Ordinary backend unit tests run with `cd backend && mvn test`; Phase 10 (including Phase 18), 11, 13, 14, 16, 17, and 20 Compose integration classes are opt-in via `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, `PHASE16_INTEGRATION`, `PHASE17_INTEGRATION`, and `PHASE20_INTEGRATION`. GitHub Actions runs the complete suite against an ephemeral Compose stack and builds the frontend. See Phases 19–20 below for the console and credential history.
+`Phase10ComposeIntegrationTest` exercises a valid signed publish and modifies signed telemetry bytes to verify rejection. Ordinary backend unit tests run with `cd backend && mvn test`; Phase 10 (including Phase 18), 11, 13, 14, 16, 17, and 20–26 Compose integration classes are opt-in via `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, `PHASE16_INTEGRATION`, `PHASE17_INTEGRATION`, `PHASE20_INTEGRATION`, `PHASE21_INTEGRATION`, `PHASE22_INTEGRATION`, `PHASE23_INTEGRATION`, `PHASE24_INTEGRATION`, `PHASE25_INTEGRATION`, and `PHASE26_INTEGRATION`. GitHub Actions runs legacy/Phase 21 coverage with privileged-MFA enforcement disabled, then enables it for Phases 22–26. See Phases 19–26 below for the console, credential history, and MFA.
 
 ## Phase 19: role-aware web control plane
 
@@ -460,6 +467,89 @@ Provisioning and credential rotation now create append-only `device_credential_a
 
 The device details modal shows recent issue/rotation events and abbreviated public-key fingerprints. Device provisioning/rotation responses remain `Cache-Control: no-store` and still deliver the password/private key once only. Flyway V13 installs an append-only trigger for the new table. `Phase20DeviceCredentialAuditComposeIntegrationTest` checks secret minimization, role restrictions, filters/pagination, rotation continuity, rollback when the audit insert fails, no-store headers, and UPDATE/DELETE rejection.
 
+## Phase 21: add TOTP MFA for privileged accounts
+
+ADMIN and SECURITY_ANALYST accounts can enroll an authenticator at **Account security** in the console. Setup requires the account password, delivers a Base32 secret and `otpauth://` URI with `Cache-Control: no-store`, and expires after ten minutes unless confirmed with a valid six-digit TOTP code. The secret is encrypted using AES-256-GCM before storage; configure a stable, private `MFA_ENCRYPTION_KEY`. Authenticator codes allow a one-step clock window and each accepted time counter can be used only once.
+
+Enabling MFA immediately invalidates existing access tokens. Subsequent password sign-in returns a five-minute, single-use MFA challenge rather than an access token; the challenge is not accepted as a bearer credential and must be completed with TOTP or a single-use recovery code. Ten random recovery codes are shown once, while only SHA-256 hashes are persisted. Recovery-code use/rotation, enrollment start/enable, and disable events are stored in an append-only `mfa_security_audits` ledger. ADMIN and SECURITY_ANALYST can review that history; USER accounts cannot access MFA management or audit routes. Disabling MFA normally requires the account password and a fresh TOTP code; Phase 25 also provides an auditable password-plus-unused-recovery-code route, and Phase 26 adds recovery by a different MFA-enabled ADMIN for another privileged account. Each route revokes the target’s current tokens. The console keeps session tokens and one-time recovery codes only in memory.
+
+Flyway V14 adds the encrypted-seed state, recovery hashes, challenge tracking, and MFA audit history. `Phase21TotpMfaComposeIntegrationTest` covers enrollment, storage minimization, challenge-only sign-in, TOTP/recovery verification and replay rejection, token revocation, role restrictions, rollback, and append-only audit integrity. To test Phase 21's optional mode manually, set `MFA_REQUIRE_PRIVILEGED=false`, configure `MFA_ENCRYPTION_KEY`, and rebuild/restart Compose; then sign in as an ADMIN or SECURITY_ANALYST, open **Account security**, enter the displayed setup key in an authenticator, confirm with a current code, save the one-time recovery codes, and sign in again with TOTP (or a recovery code).
+
+## Phase 22: require MFA for privileged accounts
+
+`MFA_REQUIRE_PRIVILEGED` defaults to `true`. With enforcement enabled, a correct password for an ADMIN or SECURITY_ANALYST without MFA returns an enrollment-only challenge (ten-minute expiry), not an access token. The challenge has its own JWT purpose and database purpose (`ENROLLMENT`), is not accepted by the bearer-token filter, and can call only the required-enrollment setup/confirmation operations. A correct TOTP code enables MFA, consumes the challenge, returns the first normal access token, and displays ten one-time recovery codes. Subsequent sign-ins use Phase 21's five-minute second-factor challenge. After enforcement is enabled and the backend is recreated, previously issued access tokens for privileged accounts without MFA are also rejected; those users must sign in and complete setup.
+
+Use `MFA_REQUIRE_PRIVILEGED=false` to retain Phase 21's optional-MFA mode. After changing this setting in `.env`, recreate the backend so Spring loads the new environment value:
+
+```bash
+# Enable enforcement (the default)
+sed -i 's/^MFA_REQUIRE_PRIVILEGED=.*/MFA_REQUIRE_PRIVILEGED=true/' .env
+docker compose up -d --force-recreate --no-deps backend
+
+# Or disable enforcement for optional MFA
+sed -i 's/^MFA_REQUIRE_PRIVILEGED=.*/MFA_REQUIRE_PRIVILEGED=false/' .env
+docker compose up -d --force-recreate --no-deps backend
+```
+
+Flyway V15 adds the challenge-purpose discriminator. `Phase21TotpMfaComposeIntegrationTest` runs with enforcement off and verifies existing optional-MFA behavior; `Phase22PrivilegedMfaEnforcementComposeIntegrationTest` runs with enforcement on and checks ADMIN/SECURITY_ANALYST enrollment challenges, the missing-access-token boundary, restricted routes, enrollment completion, TOTP login, and continued ordinary USER login. GitHub Actions explicitly tests the two policy modes in sequence.
+
+## Phase 23: rotate MFA recovery codes
+
+An MFA-enabled ADMIN or SECURITY_ANALYST can replace all recovery codes from **Account security**. The API requires both the account password and a fresh, unused TOTP code; recovery codes cannot authorize their own replacement. `POST /api/auth/mfa/recovery-codes/rotate` returns ten new one-time codes with `Cache-Control: no-store`, invalidates every previous code in the same transaction, and leaves the current access session active. The TOTP counter is advanced to prevent reuse, and the rotation is appended as `RECOVERY_CODES_ROTATED` in the MFA audit history. The codes remain high-entropy random values stored as SHA-256 hashes, as before.
+
+Flyway V16 extends the allowed MFA audit operations. `Phase23MfaRecoveryCodeRotationComposeIntegrationTest` covers enrollment, password/TOTP verification, rollback when audit insertion fails, atomic replacement, replay rejection, audit history, rejection of an old code, and successful sign-in with a replacement code. Rotation is available only while MFA is enabled; if you lose both the authenticator and every recovery code, Phase 23 cannot recover the account, but a different MFA-enabled ADMIN can use Phase 26 for an enabled privileged target.
+
+## Phase 24: rate-limit privileged MFA management
+
+The existing bounded limiter now protects password/TOTP-sensitive account-security operations as well as login and second-factor verification. It covers optional MFA setup/confirmation, MFA disable, recovery-code rotation, and the required-enrollment challenge endpoints. Each socket peer shares one 20-attempt/60-second window by default, controlled by `AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS` and `AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS`. Excess attempts return `429 Too Many Requests`, `Retry-After`, and `AUTH_RATE_LIMITED` before password/TOTP verification or a security mutation; responses are `no-store`. The generic response message does not reveal whether an account or MFA proof was valid.
+
+The limiter remains process-local and peer-address-based, so restarting the backend clears the window and multi-replica deployments need a shared limiter. `Phase24MfaManagementRateLimitComposeIntegrationTest` verifies the recovery-code rotation route returns `429` after the peer budget is exhausted and that denied requests do not advance the TOTP counter, replace codes, or append a rotation audit. Run it only against a disposable Compose database; the test registers a unique analyst account and consumes the configured per-peer budget:
+
+```bash
+set -a
+. ./.env
+set +a
+docker compose restart backend
+for attempt in $(seq 1 45); do
+  curl --fail --silent "http://127.0.0.1:${BACKEND_PORT:-8080}/actuator/health" >/dev/null && break
+  sleep 2
+done
+curl --fail --silent "http://127.0.0.1:${BACKEND_PORT:-8080}/actuator/health" >/dev/null
+export PHASE24_INTEGRATION=true
+export PHASE24_MAX_ATTEMPTS="${AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS:-20}"
+export PHASE24_WINDOW_SECONDS="${AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS:-60}"
+export PHASE24_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
+(cd backend && mvn -Dtest=Phase24MfaManagementRateLimitComposeIntegrationTest test)
+```
+
+## Phase 25: recover MFA access with a recovery code
+
+If an ADMIN or SECURITY_ANALYST loses access to their authenticator but still has at least one unused recovery code, they can disable MFA from **Account security** using their account password and that recovery code. `POST /api/auth/mfa/disable/recovery-code` consumes the submitted code, invalidates all remaining recovery codes, disables MFA, and revokes every active token. It returns `Cache-Control: no-store` and records `RECOVERY_CODE_USED` followed by `DISABLED` in the append-only MFA history within the same transaction. A failed password or invalid/used recovery code changes nothing. With the default `MFA_REQUIRE_PRIVILEGED=true`, the next sign-in returns an enrollment-only challenge; with optional MFA mode, the user signs in without MFA and can enroll again from Account security.
+
+This recovery path deliberately requires a second, unused recovery code after a recovery-code login; a consumed code cannot be reused. If no unused code or authenticator remains, a different MFA-enabled ADMIN can use the Phase 26 workflow for an enabled privileged target. `Phase25MfaRecoveryCodeDisableComposeIntegrationTest` checks failure/success, full code invalidation, token revocation, post-reset mandatory enrollment, and both audit events.
+
+## Phase 26: admin-assisted MFA recovery
+
+If an enabled ADMIN or SECURITY_ANALYST has lost every MFA factor, a *different*, enabled ADMIN whose own MFA is enabled can recover the target account. The acting administrator must provide their own password and a fresh six-digit TOTP code; self-recovery, disabled accounts, non-privileged targets, and targets without enabled MFA are rejected. The rate-limited `POST /api/admin/mfa/recovery` endpoint returns `Cache-Control: no-store` and is not available to SECURITY_ANALYST or USER callers.
+
+A successful request locks the actor and target in a consistent order and performs all changes in one transaction: advance the actor’s TOTP counter, disable the target’s MFA (incrementing its MFA-auth version and revoking all existing access tokens), remove every target recovery-code hash, delete all target login/enrollment challenges, and append `ADMIN_MFA_RECOVERY` with both target and actor IDs/usernames. It does not generate or return a secret or recovery code. Under mandatory privileged MFA, the target’s next password sign-in requires a new enrollment; in optional mode, the target can sign in without MFA and enroll again later.
+
+The Account security page exposes the recovery form only to an MFA-enabled ADMIN. MFA audit events show the actor when it differs from the target. Flyway V17 adds actor snapshots to new audit events and permits the new operation; older audit rows remain valid with null actor fields. `Phase26AdminMfaRecoveryComposeIntegrationTest` covers ADMIN and SECURITY_ANALYST targets, wrong/self/replayed proofs, audit-failure rollback, code/challenge/token cleanup, audit attribution, no-store responses, and mandatory re-enrollment. The workflow restarts the backend limiter before the Phase 26 Compose integration test.
+
+To run this integration test manually, use a disposable Compose stack with `MFA_REQUIRE_PRIVILEGED=true`; it creates unique accounts and leaves audit rows behind:
+
+```bash
+docker compose restart backend
+for attempt in $(seq 1 45); do
+  curl --fail --silent "http://127.0.0.1:${BACKEND_PORT:-8080}/actuator/health" >/dev/null && break
+  sleep 2
+done
+curl --fail --silent "http://127.0.0.1:${BACKEND_PORT:-8080}/actuator/health" >/dev/null
+export PHASE26_INTEGRATION=true
+export PHASE26_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
+(cd backend && mvn -Dtest=Phase26AdminMfaRecoveryComposeIntegrationTest test)
+```
+
 ## Security locations and limitations
 
 - `JwtAuthenticationFilter` authenticates API callers and reloads current account status/role.
@@ -468,11 +558,11 @@ The device details modal shows recent issue/rotation events and abbreviated publ
 - `MqttDynamicSecurityService` uses verified TLS and the dedicated Dynamic Security administrator to provision/rotate device credentials. Broker accounts stay enabled across device-status changes so the backend can audit `DEVICE_NOT_ACTIVE` denials.
 - Mosquitto Dynamic Security assigns each device a unique role with one literal publish ACL for `iot/telemetry/{deviceCode}`; the backend subscriber uses a distinct least-privilege account.
 - `TelemetryIngestionService` validates payload shape and sequence, then applies the same active-status/policy decision. Accepted sequence advancement and telemetry persistence are atomic; repeated/lower sequences are audited and not stored.
-- `LoginRateLimiter` throttles login attempts per socket peer in a bounded in-memory window; `AuthenticationAuditService` records admitted login success/failure events without credential material. `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService`, `DeviceStatusAuditService`, `DeviceCredentialAuditService`, and `PolicyChangeAuditService` persist their respective management histories separately. Authentication, access-decision, ownership, status-change, credential-lifecycle, policy-change, and telemetry history reads are restricted to `ADMIN` and `SECURITY_ANALYST`.
+- `LoginRateLimiter` throttles login and MFA security-proof operations per socket peer in a bounded in-memory window; `AuthenticationAuditService` records admitted login success/failure events without credential material. `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService`, `DeviceStatusAuditService`, `DeviceCredentialAuditService`, and `PolicyChangeAuditService` persist their respective management histories separately. Authentication, access-decision, ownership, status-change, credential-lifecycle, policy-change, and telemetry history reads are restricted to `ADMIN` and `SECURITY_ANALYST`.
 - Device status transitions and policy CREATE/UPDATE/DELETE audits share the transaction with the mutation. No-op status changes and rejected management requests create no change event; failed login attempts are recorded separately. Policy DELETE history remains available by policy ID after the live policy row is removed.
 - No role can override an explicit `DENY`; missing policies default to `DENY`.
 
-This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, Ed25519-signed application payloads, and replay sequence checking. The Phase 19–20 console is a client for these APIs, not a separate enforcement gateway. Credential expiry, automated CA rotation, MFA, hardware-backed key storage, production secret management, and a distributed production rate limiter are not implemented.
+This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, Ed25519-signed application payloads, and replay sequence checking. The Phase 19–26 console is a client for these APIs, not a separate enforcement gateway. Privileged-account MFA enforcement defaults on but can be disabled; the factor is TOTP with recovery codes. MFA is not enforced for non-privileged accounts; credential expiry, automated CA rotation, hardware-backed key storage, production secret management, and a distributed production rate limiter are not implemented.
 
 ## Useful commands
 

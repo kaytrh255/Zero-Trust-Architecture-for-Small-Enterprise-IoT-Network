@@ -38,7 +38,14 @@ public class SecurityConfig {
                         .accessDeniedHandler(exceptionHandler)
                 )
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers(HttpMethod.POST, "/api/auth/register", "/api/auth/login").permitAll()
+                        .requestMatchers(
+                                HttpMethod.POST,
+                                "/api/auth/register",
+                                "/api/auth/login",
+                                "/api/auth/mfa/verify",
+                                "/api/auth/mfa/required-enrollment",
+                                "/api/auth/mfa/required-enrollment/confirm"
+                        ).permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health").permitAll()
                         .anyRequest().authenticated()
                 )

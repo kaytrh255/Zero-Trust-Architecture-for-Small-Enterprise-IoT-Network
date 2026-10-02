@@ -9,8 +9,11 @@ import com.yak.zerotrust.entity.UserRole;
 import com.yak.zerotrust.exception.UsernameAlreadyExistsException;
 import com.yak.zerotrust.repository.UserRepository;
 import com.yak.zerotrust.security.JwtService;
+import com.yak.zerotrust.security.MfaEnforcementPolicy;
+import com.yak.zerotrust.security.MfaLoginVerification;
 import com.yak.zerotrust.security.UserPrincipal;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
@@ -28,19 +31,25 @@ public class AuthService {
     private final AuthenticationManager authenticationManager;
     private final JwtService jwtService;
     private final AuthenticationAuditService authenticationAuditService;
+    private final MfaService mfaService;
+    private final MfaEnforcementPolicy mfaEnforcementPolicy;
 
     public AuthService(
             UserRepository userRepository,
             PasswordEncoder passwordEncoder,
             AuthenticationManager authenticationManager,
             JwtService jwtService,
-            AuthenticationAuditService authenticationAuditService
+            AuthenticationAuditService authenticationAuditService,
+            MfaService mfaService,
+            MfaEnforcementPolicy mfaEnforcementPolicy
     ) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.authenticationManager = authenticationManager;
         this.jwtService = jwtService;
         this.authenticationAuditService = authenticationAuditService;
+        this.mfaService = mfaService;
+        this.mfaEnforcementPolicy = mfaEnforcementPolicy;
     }
 
     @Transactional
@@ -73,14 +82,31 @@ public class AuthService {
         }
 
         UserPrincipal principal = (UserPrincipal) authentication.getPrincipal();
-        String token = jwtService.generateToken(principal.getUsername());
+        if (principal.isMfaEnabled()) {
+            String challengeToken = mfaService.issueLoginChallenge(principal);
+            return AuthResponse.mfaChallenge(challengeToken, jwtService.getMfaChallengeExpirationSeconds());
+        }
+        if (mfaEnforcementPolicy.requiresEnrollment(principal)) {
+            String enrollmentToken = mfaService.issueRequiredEnrollmentChallenge(principal);
+            return AuthResponse.mfaEnrollmentChallenge(
+                    enrollmentToken,
+                    jwtService.getMfaEnrollmentChallengeExpirationSeconds()
+            );
+        }
+
+        String token = jwtService.generateToken(principal.getUsername(), principal.getMfaAuthVersion());
         authenticationAuditService.recordSuccessfulLogin(principal);
-        return new AuthResponse(
-                token,
-                "Bearer",
-                jwtService.getExpirationSeconds(),
-                toResponse(principal)
-        );
+        return AuthResponse.authenticated(token, jwtService.getExpirationSeconds(), toResponse(principal));
+    }
+
+    public AuthResponse verifyMfa(String challengeToken, String code) {
+        MfaLoginVerification verification = mfaService.verifyLoginChallenge(challengeToken, code);
+        if (!verification.successful()) {
+            throw new BadCredentialsException("Invalid authentication code");
+        }
+        UserPrincipal principal = verification.principal();
+        String token = jwtService.generateToken(principal.getUsername(), principal.getMfaAuthVersion());
+        return AuthResponse.authenticated(token, jwtService.getExpirationSeconds(), toResponse(principal));
     }
 
     public UserResponse currentUser(UserPrincipal principal) {

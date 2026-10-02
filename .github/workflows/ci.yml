@@ -1,4 +1,4 @@
-name: Build and Compose integration (Phase 20)
+name: Build and Compose integration (Phase 26)
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: phase20-ci-${{ github.ref }}
+  group: phase26-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -60,10 +60,15 @@ jobs:
               echo "PHASE14_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
               echo "PHASE16_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
               echo "PHASE20_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
+              echo "PHASE21_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
+              echo "PHASE22_ADMIN_PASSWORD=${value}" >> "$GITHUB_ENV"
             fi
           done
+          sed -i 's/^MFA_REQUIRE_PRIVILEGED=.*/MFA_REQUIRE_PRIVILEGED=false/' .env
           jwt_secret="$(openssl rand -base64 32 | tr -d '\n')"
           sed -i "s|^JWT_SECRET=.*|JWT_SECRET=${jwt_secret}|" .env
+          mfa_encryption_key="$(openssl rand -base64 32 | tr -d '\n')"
+          sed -i "s|^MFA_ENCRYPTION_KEY=.*|MFA_ENCRYPTION_KEY=${mfa_encryption_key}|" .env
           # Enable packet-header tracing only in this disposable CI checkout.
           sed -i '/^log_type information$/a log_type debug' mosquitto/config/mosquitto.conf
 
@@ -142,6 +147,29 @@ jobs:
           PHASE20_BASE_URL: http://127.0.0.1:8080
         run: mvn --batch-mode -Dtest=Phase20DeviceCredentialAuditComposeIntegrationTest test
 
+      - name: Reset process-local limiter before Phase 21
+        run: docker compose restart backend
+
+      - name: Wait for backend before Phase 21
+        shell: bash
+        run: |
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/actuator/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color --timestamps backend || true
+          exit 1
+
+      - name: Run Phase 21 TOTP MFA Compose integration test
+        working-directory: backend
+        env:
+          PHASE21_INTEGRATION: 'true'
+          PHASE21_ADMIN_USERNAME: admin
+          PHASE21_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase21TotpMfaComposeIntegrationTest test
+
       - name: Reset process-local limiter before Phase 17
         run: docker compose restart backend
 
@@ -165,6 +193,123 @@ jobs:
           PHASE17_WINDOW_SECONDS: '60'
           PHASE17_BASE_URL: http://127.0.0.1:8080
         run: mvn --batch-mode -Dtest=Phase17LoginRateLimitComposeIntegrationTest test
+
+      - name: Enable mandatory privileged MFA for Phases 22–26
+        shell: bash
+        run: |
+          sed -i 's/^MFA_REQUIRE_PRIVILEGED=.*/MFA_REQUIRE_PRIVILEGED=true/' .env
+          test "$(grep '^MFA_REQUIRE_PRIVILEGED=' .env | cut -d= -f2)" = 'true'
+          docker compose up --detach --force-recreate --no-deps backend
+
+      - name: Wait for backend before Phase 22
+        shell: bash
+        run: |
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/actuator/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color --timestamps backend || true
+          exit 1
+
+      - name: Run Phase 22 privileged MFA enforcement integration test
+        working-directory: backend
+        env:
+          PHASE22_INTEGRATION: 'true'
+          PHASE22_ADMIN_USERNAME: admin
+          PHASE22_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase22PrivilegedMfaEnforcementComposeIntegrationTest test
+
+      - name: Reset process-local limiter before Phase 23
+        run: docker compose restart backend
+
+      - name: Wait for backend before Phase 23
+        shell: bash
+        run: |
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/actuator/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color --timestamps backend || true
+          exit 1
+
+      - name: Run Phase 23 MFA recovery-code rotation integration test
+        working-directory: backend
+        env:
+          PHASE23_INTEGRATION: 'true'
+          PHASE23_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase23MfaRecoveryCodeRotationComposeIntegrationTest test
+
+      - name: Reset process-local limiter before Phase 24
+        run: docker compose restart backend
+
+      - name: Wait for backend before Phase 24
+        shell: bash
+        run: |
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/actuator/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color --timestamps backend || true
+          exit 1
+
+      - name: Run Phase 24 MFA management rate-limit integration test
+        working-directory: backend
+        env:
+          PHASE24_INTEGRATION: 'true'
+          PHASE24_MAX_ATTEMPTS: '20'
+          PHASE24_WINDOW_SECONDS: '60'
+          PHASE24_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase24MfaManagementRateLimitComposeIntegrationTest test
+
+      - name: Reset process-local limiter before Phase 25
+        run: docker compose restart backend
+
+      - name: Wait for backend before Phase 25
+        shell: bash
+        run: |
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/actuator/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color --timestamps backend || true
+          exit 1
+
+      - name: Run Phase 25 MFA recovery-code disable integration test
+        working-directory: backend
+        env:
+          PHASE25_INTEGRATION: 'true'
+          PHASE25_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase25MfaRecoveryCodeDisableComposeIntegrationTest test
+
+      - name: Reset process-local limiter before Phase 26
+        run: docker compose restart backend
+
+      - name: Wait for backend before Phase 26
+        shell: bash
+        run: |
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/actuator/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color --timestamps backend || true
+          exit 1
+
+      - name: Run Phase 26 admin-assisted MFA recovery integration test
+        working-directory: backend
+        env:
+          PHASE26_INTEGRATION: 'true'
+          PHASE26_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase26AdminMfaRecoveryComposeIntegrationTest test
 
       - name: Add Maven test reports to the job summary
         if: always()
@@ -194,7 +339,13 @@ jobs:
             target/surefire-reports/com.yak.zerotrust.integration.Phase14DatabaseRolesComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase16AuthenticationAuditComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase17LoginRateLimitComposeIntegrationTest.txt \
-            target/surefire-reports/com.yak.zerotrust.integration.Phase20DeviceCredentialAuditComposeIntegrationTest.txt; do
+            target/surefire-reports/com.yak.zerotrust.integration.Phase20DeviceCredentialAuditComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase21TotpMfaComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase22PrivilegedMfaEnforcementComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase23MfaRecoveryCodeRotationComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase24MfaManagementRateLimitComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase25MfaRecoveryCodeDisableComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase26AdminMfaRecoveryComposeIntegrationTest.txt; do
             if [ ! -f "$report" ] || ! grep -Eq 'Failures: [1-9][0-9]*|Errors: [1-9][0-9]*' "$report"; then
               continue
             fi

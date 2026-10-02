@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
-  Activity, Bell, ChevronDown, Fingerprint, LayoutDashboard, LogOut, Menu, RadioTower,
+  Activity, Bell, ChevronDown, Fingerprint, LayoutDashboard, LockKeyhole, LogOut, Menu, RadioTower,
   ScrollText, ShieldAlert, ShieldCheck, Waves, X,
 } from 'lucide-react';
 import { api } from '../lib/api';
@@ -8,12 +8,13 @@ import type { UserProfile } from '../types';
 import type { Notice } from '../App';
 import { Badge } from './ui';
 
-export type ViewKey = 'overview' | 'devices' | 'policies' | 'access' | 'authentication' | 'telemetry';
+export type ViewKey = 'overview' | 'devices' | 'policies' | 'access' | 'authentication' | 'telemetry' | 'security';
 
 const navigation = [
   { id: 'overview', label: 'Overview', group: 'Workspace', icon: LayoutDashboard },
   { id: 'devices', label: 'Device identities', group: 'Workspace', icon: RadioTower },
   { id: 'policies', label: 'Policy engine', group: 'Workspace', icon: ShieldCheck },
+  { id: 'security', label: 'Account security', group: 'Workspace', icon: LockKeyhole },
   { id: 'access', label: 'Access decisions', group: 'Monitoring', icon: ScrollText },
   { id: 'authentication', label: 'Login history', group: 'Monitoring', icon: Fingerprint },
   { id: 'telemetry', label: 'Telemetry', group: 'Monitoring', icon: Waves },
@@ -26,6 +27,7 @@ const pageMeta: Record<ViewKey, { title: string; crumb: string }> = {
   access: { title: 'Access decisions', crumb: 'Monitoring / Access decisions' },
   authentication: { title: 'Login history', crumb: 'Monitoring / Login history' },
   telemetry: { title: 'Telemetry', crumb: 'Monitoring / Telemetry' },
+  security: { title: 'Account security', crumb: 'Workspace / Account security' },
 };
 
 export function Shell({
@@ -129,7 +131,7 @@ export function Shell({
         <main className="main-content">
           <div className="breadcrumb-mobile"><span>CONTROL PLANE</span><i>/</i>{pageMeta[activeView].crumb.split('/')[1]}</div>
           {children}
-          <footer className="content-footer"><span><span className="footer-shield"><ShieldCheck size={12} /></span> Zero Trust Architecture for Small Enterprise IoT</span><span>PHASE 20 · CONTROL PLANE</span></footer>
+          <footer className="content-footer"><span><span className="footer-shield"><ShieldCheck size={12} /></span> Zero Trust Architecture for Small Enterprise IoT</span><span>PHASE 22 · CONTROL PLANE</span></footer>
         </main>
       </div>
       {notice && (

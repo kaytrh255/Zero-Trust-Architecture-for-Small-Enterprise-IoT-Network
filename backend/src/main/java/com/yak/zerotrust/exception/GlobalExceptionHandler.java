@@ -101,6 +101,14 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, "INVALID_AUDIT_QUERY", exception.getMessage(), request);
     }
 
+    @ExceptionHandler(InvalidMfaOperationException.class)
+    public ResponseEntity<ApiError> handleInvalidMfaOperation(
+            InvalidMfaOperationException exception,
+            HttpServletRequest request
+    ) {
+        return errorNoStore(HttpStatus.BAD_REQUEST, "INVALID_MFA_OPERATION", exception.getMessage(), request);
+    }
+
     @ExceptionHandler(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class)
     public ResponseEntity<ApiError> handleInvalidParameter(HttpServletRequest request) {
         return error(HttpStatus.BAD_REQUEST, "INVALID_PARAMETER", "A request parameter has an invalid value", request);
@@ -119,7 +127,7 @@ public class GlobalExceptionHandler {
         ApiError body = new ApiError(
                 Instant.now(),
                 HttpStatus.TOO_MANY_REQUESTS.value(),
-                "LOGIN_RATE_LIMITED",
+                "AUTH_RATE_LIMITED",
                 exception.getMessage(),
                 request.getRequestURI()
         );
@@ -131,7 +139,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(AuthenticationException.class)
     public ResponseEntity<ApiError> handleAuthenticationFailure(HttpServletRequest request) {
-        return error(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Invalid username or password", request);
+        return errorNoStore(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Invalid username or password", request);
     }
 
     @ExceptionHandler(Exception.class)
@@ -157,6 +165,20 @@ public class GlobalExceptionHandler {
             HttpServletRequest request
     ) {
         ApiError body = new ApiError(Instant.now(), status.value(), code, message, request.getRequestURI());
-        return ResponseEntity.status(status).body(body);
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(status);
+        if ("/api/admin/mfa/recovery".equals(request.getRequestURI())) {
+            response.cacheControl(CacheControl.noStore());
+        }
+        return response.body(body);
+    }
+
+    private ResponseEntity<ApiError> errorNoStore(
+            HttpStatus status,
+            String code,
+            String message,
+            HttpServletRequest request
+    ) {
+        ApiError body = new ApiError(Instant.now(), status.value(), code, message, request.getRequestURI());
+        return ResponseEntity.status(status).cacheControl(CacheControl.noStore()).body(body);
     }
 }

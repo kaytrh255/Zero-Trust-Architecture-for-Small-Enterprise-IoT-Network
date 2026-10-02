@@ -57,9 +57,9 @@ class Phase17LoginRateLimitComposeIntegrationTest {
         assertThat(limitedResponse)
                 .as("the same socket peer should be rate-limited even when X-Forwarded-For varies")
                 .isNotNull();
-        assertThat(limitedResponse.body().path("error").asText()).isEqualTo("LOGIN_RATE_LIMITED");
+        assertThat(limitedResponse.body().path("error").asText()).isEqualTo("AUTH_RATE_LIMITED");
         assertThat(limitedResponse.body().path("message").asText())
-                .isEqualTo("Too many login attempts. Try again later.");
+                .isEqualTo("Too many authentication attempts.");
         assertThat(limitedResponse.retryAfterSeconds()).isNotNull();
         assertThat(Long.parseLong(limitedResponse.retryAfterSeconds()))
                 .isBetween(1L, (long) windowSeconds);

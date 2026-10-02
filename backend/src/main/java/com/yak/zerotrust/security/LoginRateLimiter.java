@@ -9,7 +9,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/** A bounded, single-process fixed-window limiter keyed by the socket peer address. */
+/** A bounded, single-process fixed-window limiter for authentication proofs keyed by socket peer. */
 @Component
 public class LoginRateLimiter {
 

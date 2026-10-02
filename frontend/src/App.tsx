@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { LoginPage } from './pages/LoginPage';
+import { MfaSecurityPage } from './pages/MfaSecurityPage';
 import { AccessAuditsPage } from './pages/AccessAuditsPage';
 import { AuthenticationAuditsPage } from './pages/AuthenticationAuditsPage';
 import { DevicesPage } from './pages/DevicesPage';
@@ -76,6 +77,7 @@ export default function App() {
       {activeView === 'access' && <AccessAuditsPage key="access" {...pageProps} />}
       {activeView === 'authentication' && <AuthenticationAuditsPage key="authentication" {...pageProps} />}
       {activeView === 'telemetry' && <TelemetryPage key="telemetry" {...pageProps} />}
+      {activeView === 'security' && <MfaSecurityPage key="security" token={token} user={user} notify={notify} onLogout={logout} />}
     </Shell>
   );
 }

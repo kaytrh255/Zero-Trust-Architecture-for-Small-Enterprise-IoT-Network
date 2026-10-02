@@ -25,6 +25,9 @@ security:
     max-attempts: ${AUTH_LOGIN_RATE_LIMIT_MAX_ATTEMPTS:20}
     window-seconds: ${AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS:60}
     max-tracked-clients: ${AUTH_LOGIN_RATE_LIMIT_MAX_TRACKED_CLIENTS:10000}
+  mfa:
+    encryption-key: ${MFA_ENCRYPTION_KEY}
+    require-privileged: ${MFA_REQUIRE_PRIVILEGED:true}
 
 app:
   bootstrap:

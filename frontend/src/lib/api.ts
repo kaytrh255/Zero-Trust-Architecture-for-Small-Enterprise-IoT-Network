@@ -9,6 +9,13 @@ import type {
   DeviceProvisioningResponse,
   DeviceStatus,
   DeviceType,
+  LoginResponse,
+  MfaEnrollment,
+  MfaRecoveryCodes,
+  MfaRequiredEnrollmentCompletion,
+  MfaSecurityAudit,
+  MfaStatus,
+  MfaSecurityAuditOperation,
   Policy,
   PolicyAction,
   PolicyEffect,
@@ -90,10 +97,49 @@ const queryString = (values: Record<string, string | number | boolean | null | u
 export const api = {
   health: () => request<{ status: string }>('/actuator/health'),
   login: (username: string, password: string) =>
-    request<AuthResponse>('/api/auth/login', { method: 'POST', body: { username, password } }),
+    request<LoginResponse>('/api/auth/login', { method: 'POST', body: { username, password } }),
+  verifyMfa: (mfaToken: string, code: string) =>
+    request<AuthResponse>('/api/auth/mfa/verify', { method: 'POST', body: { mfaToken, code } }),
+  beginRequiredMfaEnrollment: (enrollmentToken: string) =>
+    request<MfaEnrollment>('/api/auth/mfa/required-enrollment', { method: 'POST', body: { enrollmentToken } }),
+  confirmRequiredMfaEnrollment: (enrollmentToken: string, code: string) =>
+    request<MfaRequiredEnrollmentCompletion>('/api/auth/mfa/required-enrollment/confirm', {
+      method: 'POST',
+      body: { enrollmentToken, code },
+    }),
   register: (username: string, password: string, fullName: string) =>
     request<UserProfile>('/api/auth/register', { method: 'POST', body: { username, password, fullName } }),
   currentUser: (token: string) => request<UserProfile>('/api/auth/me', { token }),
+  mfaStatus: (token: string) => request<MfaStatus>('/api/auth/mfa/status', { token }),
+  beginMfaEnrollment: (token: string, password: string) =>
+    request<MfaEnrollment>('/api/auth/mfa/enrollment', { token, method: 'POST', body: { password } }),
+  confirmMfaEnrollment: (token: string, code: string) =>
+    request<MfaRecoveryCodes>('/api/auth/mfa/enrollment/confirm', { token, method: 'POST', body: { code } }),
+  disableMfa: (token: string, password: string, code: string) =>
+    request<MfaStatus>('/api/auth/mfa/disable', { token, method: 'POST', body: { password, code } }),
+  disableMfaWithRecoveryCode: (token: string, password: string, recoveryCode: string) =>
+    request<MfaStatus>('/api/auth/mfa/disable/recovery-code', {
+      token,
+      method: 'POST',
+      body: { password, recoveryCode },
+    }),
+  rotateMfaRecoveryCodes: (token: string, password: string, code: string) =>
+    request<MfaRecoveryCodes>('/api/auth/mfa/recovery-codes/rotate', {
+      token,
+      method: 'POST',
+      body: { password, code },
+    }),
+  adminRecoverMfa: (token: string, targetUsername: string, password: string, code: string) =>
+    request<MfaStatus>('/api/admin/mfa/recovery', {
+      token,
+      method: 'POST',
+      body: { targetUsername, password, code },
+    }),
+  mfaSecurityAudits: (token: string, page = 0, filters: { operation?: MfaSecurityAuditOperation; username?: string } = {}) =>
+    request<AuditPage<MfaSecurityAudit>>(
+      `/api/auth/mfa/audits${queryString({ page, size: 20, ...filters })}`,
+      { token },
+    ),
 
   devices: (token: string) => request<Device[]>('/api/devices', { token }),
   createDevice: (token: string, body: {

@@ -25,10 +25,71 @@ export interface UserProfile {
 }
 
 export interface AuthResponse {
+  mfaRequired: false;
+  mfaEnrollmentRequired: false;
   accessToken: string;
   tokenType: 'Bearer';
   expiresInSeconds: number;
   user: UserProfile;
+}
+
+export interface MfaChallengeResponse {
+  mfaRequired: true;
+  mfaEnrollmentRequired: false;
+  mfaToken: string;
+  challengeExpiresInSeconds: number;
+  accessToken: null;
+  tokenType: null;
+  expiresInSeconds: number;
+  user: null;
+}
+
+export interface MfaEnrollmentChallengeResponse {
+  mfaRequired: false;
+  mfaEnrollmentRequired: true;
+  enrollmentToken: string;
+  challengeExpiresInSeconds: number;
+  accessToken: null;
+  tokenType: null;
+  expiresInSeconds: number;
+  user: null;
+}
+
+export interface MfaRequiredEnrollmentCompletion {
+  session: AuthResponse;
+  recoveryCodes: string[];
+}
+
+export type LoginResponse = AuthResponse | MfaChallengeResponse | MfaEnrollmentChallengeResponse;
+
+export type MfaSecurityAuditOperation = 'ENROLLMENT_STARTED' | 'ENABLED' | 'DISABLED' | 'RECOVERY_CODE_USED' | 'RECOVERY_CODES_ROTATED' | 'ADMIN_MFA_RECOVERY';
+
+export interface MfaStatus {
+  enabled: boolean;
+  enrollmentPending: boolean;
+  enrollmentExpiresAt: string | null;
+  recoveryCodesRemaining: number;
+}
+
+export interface MfaEnrollment {
+  secret: string;
+  otpauthUri: string;
+  expiresAt: string;
+}
+
+export interface MfaRecoveryCodes {
+  recoveryCodes: string[];
+  status: MfaStatus;
+}
+
+export interface MfaSecurityAudit {
+  id: number;
+  userId: number;
+  username: string;
+  operation: MfaSecurityAuditOperation;
+  changedAt: string;
+  actorUserId: number | null;
+  actorUsername: string | null;
 }
 
 export interface Device {

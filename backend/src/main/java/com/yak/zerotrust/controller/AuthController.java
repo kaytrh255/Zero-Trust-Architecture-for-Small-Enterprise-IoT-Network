@@ -2,6 +2,7 @@ package com.yak.zerotrust.controller;
 
 import com.yak.zerotrust.dto.AuthResponse;
 import com.yak.zerotrust.dto.LoginRequest;
+import com.yak.zerotrust.dto.MfaVerifyRequest;
 import com.yak.zerotrust.dto.RegisterRequest;
 import com.yak.zerotrust.dto.UserResponse;
 import com.yak.zerotrust.security.LoginRateLimiter;
@@ -47,6 +48,17 @@ public class AuthController {
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
                 .body(authService.login(request));
+    }
+
+    @PostMapping("/mfa/verify")
+    public ResponseEntity<AuthResponse> verifyMfa(
+            @Valid @RequestBody MfaVerifyRequest request,
+            HttpServletRequest servletRequest
+    ) {
+        loginRateLimiter.checkAndRecord(servletRequest.getRemoteAddr());
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .body(authService.verifyMfa(request.mfaToken(), request.code()));
     }
 
     @GetMapping("/me")
