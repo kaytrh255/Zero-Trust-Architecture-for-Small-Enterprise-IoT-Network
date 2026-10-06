@@ -1,0 +1,27 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Maven / Java
+**/target/
+*.class
+
+# Frontend dependencies and build output
+**/node_modules/
+/frontend/dist/
+/frontend/.env
+/frontend/.env.*
+
+# IDEs and operating systems
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Logs
+*.log
+
+# Locally generated MQTT TLS private keys, certificates, and serial files
+/mosquitto/tls/*
+!/mosquitto/tls/.gitkeep
