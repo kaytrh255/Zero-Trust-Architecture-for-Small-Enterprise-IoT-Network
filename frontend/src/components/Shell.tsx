@@ -15,7 +15,7 @@ const navigation = [
   { id: 'devices', label: 'Device identities', group: 'Workspace', icon: RadioTower },
   { id: 'policies', label: 'Policy engine', group: 'Workspace', icon: ShieldCheck },
   { id: 'security', label: 'Account security', group: 'Workspace', icon: LockKeyhole },
-  { id: 'accounts', label: 'User accounts', group: 'Administration', icon: Users },
+  { id: 'accounts', label: 'User accounts', group: 'Workspace', icon: Users },
   { id: 'access', label: 'Access decisions', group: 'Monitoring', icon: ScrollText },
   { id: 'authentication', label: 'Login history', group: 'Monitoring', icon: Fingerprint },
   { id: 'telemetry', label: 'Telemetry', group: 'Monitoring', icon: Waves },
@@ -29,7 +29,7 @@ const pageMeta: Record<ViewKey, { title: string; crumb: string }> = {
   authentication: { title: 'Login history', crumb: 'Monitoring / Login history' },
   telemetry: { title: 'Telemetry', crumb: 'Monitoring / Telemetry' },
   security: { title: 'Account security', crumb: 'Workspace / Account security' },
-  accounts: { title: 'User accounts', crumb: 'Administration / User accounts' },
+  accounts: { title: 'User accounts', crumb: 'Workspace / User accounts' }
 };
 
 export function Shell({
@@ -71,7 +71,7 @@ export function Shell({
   }, []);
 
   const initials = user.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
-  const groups = ['Workspace', 'Monitoring', 'Administration'] as const;
+  const groups = ['Workspace', 'Monitoring'] as const;
 
   function navigate(view: ViewKey) {
     onNavigate(view);
