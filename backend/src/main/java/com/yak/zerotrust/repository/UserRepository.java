@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.List;
 import java.util.Optional;
 
 public interface UserRepository extends JpaRepository<UserAccount, Long> {
@@ -25,4 +26,10 @@ public interface UserRepository extends JpaRepository<UserAccount, Long> {
     Optional<UserAccount> findByIdForMfaUpdate(@Param("id") Long id);
 
     boolean existsByUsername(String username);
+
+    List<UserAccount> findAllByOrderByUsernameAsc();
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select user from UserAccount user order by user.id")
+    List<UserAccount> findAllForAccountManagementUpdate();
 }

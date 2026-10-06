@@ -178,4 +178,13 @@ public class UserAccount {
         mfaLastTotpCounter = -1;
         mfaAuthVersion++;
     }
+
+    public void applyAdministrativeAccess(UserRole newRole, boolean newEnabled) {
+        if (role == newRole && enabled == newEnabled) {
+            return;
+        }
+        role = newRole;
+        enabled = newEnabled;
+        mfaAuthVersion++;
+    }
 }

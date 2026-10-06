@@ -31,6 +31,7 @@ A modular-monolith prototype demonstrating **Never Trust, Always Verify**. Work 
 - **Phase 24:** throttle authenticated MFA-management proofs with the bounded per-peer authentication limiter, including enrollment confirmation, disable, and recovery-code rotation.
 - **Phase 25:** let a privileged user who lost their authenticator disable MFA with their password and one unused recovery code; consume the code, invalidate the rest, revoke all sessions, and audit the recovery.
 - **Phase 26:** let a different, MFA-enabled ADMIN recover an enabled ADMIN or SECURITY_ANALYST using the actor’s password and fresh TOTP; atomically clear the target’s MFA factors/challenges, revoke tokens, and audit both identities.
+- **Phase 27:** ADMIN-only account directory and role/enabled-state management, with session and pending-challenge revocation plus immutable actor/target audit history; the console exposes the lifecycle controls to ADMINs only.
 
 The protected route and MQTT subscriber enforce decisions on the prototype's simulated resource paths. The backend is not a transparent gateway that intercepts arbitrary IoT network traffic. The web console is a role-aware client for the existing APIs; server-side authorization remains authoritative. There is no physical-device deployment.
 
@@ -453,7 +454,7 @@ New API-provisioned devices receive an Ed25519 key pair. The database stores onl
 
 The MQTT body is an envelope with unpadded-base64url `payload` and `signature` fields. The decoded `payload` is the exact UTF-8 telemetry JSON byte sequence, and the signature is Ed25519 over those exact bytes. The backend locks the device, verifies the signature against the key bound to the topic's device identity, then parses the payload and applies status, policy, and replay checks. A bad signature is audited as `DENY` / `INVALID_DEVICE_CREDENTIAL`, with no untrusted sequence; it cannot consume the high-water mark or persist telemetry. The signed payload remains capped at 2048 bytes and the full envelope at 4096 bytes.
 
-`Phase10ComposeIntegrationTest` exercises a valid signed publish and modifies signed telemetry bytes to verify rejection. Ordinary backend unit tests run with `cd backend && mvn test`; Phase 10 (including Phase 18), 11, 13, 14, 16, 17, and 20–26 Compose integration classes are opt-in via `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, `PHASE16_INTEGRATION`, `PHASE17_INTEGRATION`, `PHASE20_INTEGRATION`, `PHASE21_INTEGRATION`, `PHASE22_INTEGRATION`, `PHASE23_INTEGRATION`, `PHASE24_INTEGRATION`, `PHASE25_INTEGRATION`, and `PHASE26_INTEGRATION`. GitHub Actions runs legacy/Phase 21 coverage with privileged-MFA enforcement disabled, then enables it for Phases 22–26. See Phases 19–26 below for the console, credential history, and MFA.
+`Phase10ComposeIntegrationTest` exercises a valid signed publish and modifies signed telemetry bytes to verify rejection. Ordinary backend unit tests run with `cd backend && mvn test`; Phase 10 (including Phase 18), 11, 13, 14, 16, 17, and 20–27 Compose integration classes are opt-in via `PHASE10_INTEGRATION`, `PHASE11_INTEGRATION`, `PHASE13_INTEGRATION`, `PHASE14_INTEGRATION`, `PHASE16_INTEGRATION`, `PHASE17_INTEGRATION`, `PHASE20_INTEGRATION`, `PHASE21_INTEGRATION`, `PHASE22_INTEGRATION`, `PHASE23_INTEGRATION`, `PHASE24_INTEGRATION`, `PHASE25_INTEGRATION`, `PHASE26_INTEGRATION`, and `PHASE27_INTEGRATION`. GitHub Actions runs legacy/Phase 21 coverage with privileged-MFA enforcement disabled, then enables it for Phases 22–27. See Phases 19–27 below for the console, credential history, MFA, and account lifecycle.
 
 ## Phase 19: role-aware web control plane
 
@@ -550,6 +551,26 @@ export PHASE26_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
 (cd backend && mvn -Dtest=Phase26AdminMfaRecoveryComposeIntegrationTest test)
 ```
 
+## Phase 27: manage account lifecycle
+
+ADMINs can review the account directory at `GET /api/admin/users`, update an account with `PUT /api/admin/users/{id}` (`{"role":"SECURITY_ANALYST","enabled":true}`), and search the newest-first change history at `GET /api/admin/users/audits`. All three routes require ADMIN authorization and return `Cache-Control: no-store`. Directory responses contain only account identity, role, enabled/MFA state, and timestamps; password hashes, authenticator material, and recovery-code data are never exposed. The **User accounts** console page provides account search, role/status controls, current MFA state, and the actor/target audit ledger.
+
+Actual role or enabled-state changes increment `mfa_auth_version` so all previously issued access tokens fail validation, and delete pending login/enrollment challenges. The account mutation and its append-only audit event commit in one transaction; each event snapshots the actor and target IDs/usernames and the before/after role and enabled values. No-op requests do not create events. Administrators cannot change their own role/status, assign the internal `DEVICE` role, or remove the last enabled ADMIN. Concurrent lifecycle changes lock accounts in stable ID order so the enabled-admin invariant is checked atomically.
+
+Flyway V18 creates `user_account_audits` with actor/target foreign keys, query indexes, and an UPDATE/DELETE guard. `Phase27AccountLifecycleComposeIntegrationTest` covers the ADMIN directory boundary, secret minimization, role/status changes, token and challenge revocation, no-op/self/DEVICE rejection, audit attribution and append-only integrity, and transaction rollback when audit insertion fails. To run it manually against a disposable Compose stack, keep `MFA_REQUIRE_PRIVILEGED=true`:
+
+```bash
+docker compose restart backend
+for attempt in $(seq 1 45); do
+  curl --fail --silent "http://127.0.0.1:${BACKEND_PORT:-8080}/actuator/health" >/dev/null && break
+  sleep 2
+done
+curl --fail --silent "http://127.0.0.1:${BACKEND_PORT:-8080}/actuator/health" >/dev/null
+export PHASE27_INTEGRATION=true
+export PHASE27_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
+(cd backend && mvn -Dtest=Phase27AccountLifecycleComposeIntegrationTest test)
+```
+
 ## Security locations and limitations
 
 - `JwtAuthenticationFilter` authenticates API callers and reloads current account status/role.
@@ -558,11 +579,11 @@ export PHASE26_BASE_URL="http://127.0.0.1:${BACKEND_PORT:-8080}"
 - `MqttDynamicSecurityService` uses verified TLS and the dedicated Dynamic Security administrator to provision/rotate device credentials. Broker accounts stay enabled across device-status changes so the backend can audit `DEVICE_NOT_ACTIVE` denials.
 - Mosquitto Dynamic Security assigns each device a unique role with one literal publish ACL for `iot/telemetry/{deviceCode}`; the backend subscriber uses a distinct least-privilege account.
 - `TelemetryIngestionService` validates payload shape and sequence, then applies the same active-status/policy decision. Accepted sequence advancement and telemetry persistence are atomic; repeated/lower sequences are audited and not stored.
-- `LoginRateLimiter` throttles login and MFA security-proof operations per socket peer in a bounded in-memory window; `AuthenticationAuditService` records admitted login success/failure events without credential material. `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService`, `DeviceStatusAuditService`, `DeviceCredentialAuditService`, and `PolicyChangeAuditService` persist their respective management histories separately. Authentication, access-decision, ownership, status-change, credential-lifecycle, policy-change, and telemetry history reads are restricted to `ADMIN` and `SECURITY_ANALYST`.
+- `LoginRateLimiter` throttles login and MFA security-proof operations per socket peer in a bounded in-memory window; `AuthenticationAuditService` records admitted login success/failure events without credential material. `AccessAuditService` persists access decisions; `DeviceOwnershipAuditService`, `DeviceStatusAuditService`, `DeviceCredentialAuditService`, `PolicyChangeAuditService`, and `UserAccountManagementService` persist their respective management histories separately. Authentication, access-decision, ownership, status-change, credential-lifecycle, policy-change, and telemetry history reads are restricted to `ADMIN` and `SECURITY_ANALYST`; account-directory and account-lifecycle history APIs are ADMIN-only.
 - Device status transitions and policy CREATE/UPDATE/DELETE audits share the transaction with the mutation. No-op status changes and rejected management requests create no change event; failed login attempts are recorded separately. Policy DELETE history remains available by policy ID after the live policy row is removed.
 - No role can override an explicit `DENY`; missing policies default to `DENY`.
 
-This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, Ed25519-signed application payloads, and replay sequence checking. The Phase 19–26 console is a client for these APIs, not a separate enforcement gateway. Privileged-account MFA enforcement defaults on but can be disabled; the factor is TOTP with recovery codes. MFA is not enforced for non-privileged accounts; credential expiry, automated CA rotation, hardware-backed key storage, production secret management, and a distributed production rate limiter are not implemented.
+This is a local prototype, not a production network gateway. The protected route enforces access to this demo telemetry resource only. Ownership is enforced for that route using the authenticated JWT and the device's database owner; `/api/access/check` remains a policy-decision demonstration. MQTT uses per-device broker credentials/ACLs, TLS, Ed25519-signed application payloads, and replay sequence checking. The Phase 19–27 console is a client for these APIs, not a separate enforcement gateway. Privileged-account MFA enforcement defaults on but can be disabled; the factor is TOTP with recovery codes. MFA is not enforced for non-privileged accounts; credential expiry, automated CA rotation, hardware-backed key storage, production secret management, and a distributed production rate limiter are not implemented.
 
 ## Useful commands
 

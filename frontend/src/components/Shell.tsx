@@ -1,20 +1,21 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
   Activity, Bell, ChevronDown, Fingerprint, LayoutDashboard, LockKeyhole, LogOut, Menu, RadioTower,
-  ScrollText, ShieldAlert, ShieldCheck, Waves, X,
+  ScrollText, ShieldAlert, ShieldCheck, Users, Waves, X,
 } from 'lucide-react';
 import { api } from '../lib/api';
 import type { UserProfile } from '../types';
 import type { Notice } from '../App';
 import { Badge } from './ui';
 
-export type ViewKey = 'overview' | 'devices' | 'policies' | 'access' | 'authentication' | 'telemetry' | 'security';
+export type ViewKey = 'overview' | 'devices' | 'policies' | 'access' | 'authentication' | 'telemetry' | 'security' | 'accounts';
 
 const navigation = [
   { id: 'overview', label: 'Overview', group: 'Workspace', icon: LayoutDashboard },
   { id: 'devices', label: 'Device identities', group: 'Workspace', icon: RadioTower },
   { id: 'policies', label: 'Policy engine', group: 'Workspace', icon: ShieldCheck },
   { id: 'security', label: 'Account security', group: 'Workspace', icon: LockKeyhole },
+  { id: 'accounts', label: 'User accounts', group: 'Administration', icon: Users },
   { id: 'access', label: 'Access decisions', group: 'Monitoring', icon: ScrollText },
   { id: 'authentication', label: 'Login history', group: 'Monitoring', icon: Fingerprint },
   { id: 'telemetry', label: 'Telemetry', group: 'Monitoring', icon: Waves },
@@ -28,6 +29,7 @@ const pageMeta: Record<ViewKey, { title: string; crumb: string }> = {
   authentication: { title: 'Login history', crumb: 'Monitoring / Login history' },
   telemetry: { title: 'Telemetry', crumb: 'Monitoring / Telemetry' },
   security: { title: 'Account security', crumb: 'Workspace / Account security' },
+  accounts: { title: 'User accounts', crumb: 'Administration / User accounts' },
 };
 
 export function Shell({
@@ -69,7 +71,7 @@ export function Shell({
   }, []);
 
   const initials = user.fullName.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
-  const groups = ['Workspace', 'Monitoring'] as const;
+  const groups = ['Workspace', 'Monitoring', 'Administration'] as const;
 
   function navigate(view: ViewKey) {
     onNavigate(view);
@@ -94,7 +96,7 @@ export function Shell({
           {groups.map((group) => (
             <div className="nav-group" key={group}>
               <div className="nav-label">{group}</div>
-              {navigation.filter((item) => item.group === group).map((item) => {
+              {navigation.filter((item) => item.group === group && (item.id !== 'accounts' || user.role === 'ADMIN')).map((item) => {
                 const Icon = item.icon;
                 const selected = activeView === item.id;
                 return (
@@ -131,7 +133,7 @@ export function Shell({
         <main className="main-content">
           <div className="breadcrumb-mobile"><span>CONTROL PLANE</span><i>/</i>{pageMeta[activeView].crumb.split('/')[1]}</div>
           {children}
-          <footer className="content-footer"><span><span className="footer-shield"><ShieldCheck size={12} /></span> Zero Trust Architecture for Small Enterprise IoT</span><span>PHASE 22 · CONTROL PLANE</span></footer>
+          <footer className="content-footer"><span><span className="footer-shield"><ShieldCheck size={12} /></span> Zero Trust Architecture for Small Enterprise IoT</span><span>PHASE 27 · ACCOUNT LIFECYCLE</span></footer>
         </main>
       </div>
       {notice && (

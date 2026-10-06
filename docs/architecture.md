@@ -22,8 +22,8 @@ Nginx :3000 -> Spring Boot API <====== verified TLS ======> Mosquitto :8883
   ├── AccessController / ZeroTrustDecisionService
   ├── ProtectedResourceController / ProtectedResourceService
   ├── AccessAuditService / DeviceOwnershipAuditService / DeviceStatusAuditService
-  ├── DeviceCredentialAuditService / PolicyChangeAuditService / TelemetryIngestionService
-  ├── repositories / TelemetryQueryService
+  ├── DeviceCredentialAuditService / PolicyChangeAuditService / UserAccountManagementService
+  ├── TelemetryIngestionService / repositories / TelemetryQueryService
   └── request, audit, and telemetry DML
       | JDBC as DB_USERNAME (runtime role, DML only)
       v
@@ -38,9 +38,9 @@ postgres healthy -> db-roles-init -> db-migrate (Flyway CLI) -> backend -> front
 
 The broker exposes no plaintext MQTT listener. Compose generates a local CA and a broker certificate with `mosquitto`, `localhost`, and `127.0.0.1` SAN entries. Backend MQTT clients trust that CA and enable hostname verification. These generated development certificates are ignored by Git. The separate migration container receives `DB_MIGRATION_USERNAME` / `DB_MIGRATION_PASSWORD`; those values are not present in the backend container environment. The database bootstrap also transfers ownership on existing volumes in place; it does not require deleting application data.
 
-## Web console (Phase 19)
+## Web console (Phases 19 and 27)
 
-The frontend is a React/TypeScript single-page application with role-aware views for `ADMIN`, `SECURITY_ANALYST`, and `USER`. It consumes existing REST endpoints rather than introducing an aggregate dashboard API. Compose builds the static assets and serves them through Nginx on loopback port 3000; Nginx proxies same-origin `/api` and `/actuator` paths to Spring Boot. Local Vite development uses the same relative browser URLs with a server-side proxy to `VITE_PROXY_TARGET` (default `http://127.0.0.1:8080`). No browser CORS policy or browser-to-localhost request is required.
+The frontend is a React/TypeScript single-page application with role-aware views for `ADMIN`, `SECURITY_ANALYST`, and `USER`. It consumes existing REST endpoints rather than introducing an aggregate dashboard API. ADMINs can view **User accounts**, adjust roles/enabled state, and review actor/target lifecycle history; those controls are hidden from other roles. Compose builds the static assets and serves them through Nginx on loopback port 3000; Nginx proxies same-origin `/api` and `/actuator` paths to Spring Boot. Local Vite development uses the same relative browser URLs with a server-side proxy to `VITE_PROXY_TARGET` (default `http://127.0.0.1:8080`). No browser CORS policy or browser-to-localhost request is required.
 
 The bearer token stays in in-memory React state, so reload or sign-out requires a fresh login; it is not stored in Web Storage. One-time device credentials are shown in a temporary provisioning dialog and cleared when the dialog closes. UI role checks improve usability only; server authorization remains the security boundary.
 
@@ -60,7 +60,7 @@ POST /api/auth/login
 
 Protected HTTP requests pass through `JwtAuthenticationFilter`, which validates signature and expiry and reloads current user role/enabled state from PostgreSQL. `SecurityConfig` requires authentication for non-public routes; method-level rules protect management, audit, and telemetry reads.
 
-## Privileged MFA and recovery (Phases 21–26)
+## Privileged MFA and recovery (Phases 21–27)
 
 TOTP MFA is available to ADMIN and SECURITY_ANALYST accounts. `MFA_REQUIRE_PRIVILEGED` defaults to `true`; an unenrolled privileged user receives a purpose-restricted, ten-minute enrollment challenge after password verification, while a user who has enabled MFA receives a five-minute login challenge. Neither challenge can authenticate protected API requests. The mandatory enrollment challenge can only start setup or complete it with a valid authenticator code; confirmation creates the first access token and one-time recovery codes. Disabling MFA increments the account's MFA-auth version, and enforcement rejects existing tokens for privileged accounts without MFA.
 
@@ -69,6 +69,8 @@ Recovery codes are stored only as SHA-256 hashes and are single use. `POST /api/
 The bounded per-peer `LoginRateLimiter` also guards MFA enrollment start/confirmation, disable, and recovery-code rotation. These operations share the configured authentication attempt window with login, MFA challenge verification, and required enrollment; throttled requests return `429 AUTH_RATE_LIMITED` with `Retry-After` before a password or TOTP proof is evaluated.
 
 When an authenticator is unavailable but an unused recovery code remains, a privileged user can disable MFA with their password and that code at `POST /api/auth/mfa/disable/recovery-code`. In one transaction the code is consumed, remaining codes are deleted, MFA is disabled, `mfa_auth_version` is incremented to revoke current tokens, and recovery-use/disable events are appended. If all factors are lost, `AdminMfaRecoveryController` exposes rate-limited `POST /api/admin/mfa/recovery` to a different, MFA-enabled ADMIN only. The actor proves their own password and fresh TOTP; the enabled target must be an ADMIN or SECURITY_ANALYST with MFA. User rows are locked in sorted ID order; successful recovery advances the actor's TOTP counter, disables target MFA, deletes target recovery codes/challenges, increments the target auth version, and appends an actor-attributed `ADMIN_MFA_RECOVERY` event in the same transaction. The endpoint returns no secrets and uses `Cache-Control: no-store`; required-MFA policy then forces fresh enrollment on the target's next password sign-in. `GET /api/auth/mfa/audits` exposes the target and actor snapshots to ADMIN/SECURITY_ANALYST readers.
+
+`AdminUserController` and `UserAccountManagementService` add the Phase 27 account-lifecycle path. Only ADMINs can read `GET /api/admin/users`, update a complete desired role/enabled state through `PUT /api/admin/users/{id}`, or query `GET /api/admin/users/audits`. Responses are safe-profile snapshots and use `Cache-Control: no-store`. Service logic reloads the actor from PostgreSQL, prevents self role/status changes and assignment of internal `DEVICE`, and retains at least one enabled ADMIN. Lifecycle updates lock account rows in stable ID order, increment the target's MFA-auth version, remove pending login challenges, and append a target/actor before-after event to `user_account_audits` in the same transaction. A no-op creates no history; an audit insert failure rolls back the account update. The table is installed by Flyway V18 with actor/target foreign keys and an append-only trigger.
 
 ## Access decision path
 

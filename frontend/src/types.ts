@@ -1,4 +1,5 @@
-export type UserRole = 'ADMIN' | 'SECURITY_ANALYST' | 'USER';
+export type UserRole = 'ADMIN' | 'SECURITY_ANALYST' | 'USER' | 'DEVICE';
+export type AssignableUserRole = Exclude<UserRole, 'DEVICE'>;
 export type DeviceType = 'SENSOR' | 'CAMERA' | 'ACTUATOR' | 'GATEWAY';
 export type DeviceStatus = 'ACTIVE' | 'INACTIVE' | 'BLOCKED' | 'REVOKED';
 export type PolicyAction = 'READ' | 'WRITE' | 'EXECUTE';
@@ -22,6 +23,26 @@ export interface UserProfile {
   fullName: string;
   role: UserRole;
   enabled: boolean;
+}
+
+export interface ManagedUserAccount extends UserProfile {
+  mfaEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserAccountAudit {
+  id: number;
+  operation: 'ACCOUNT_UPDATED';
+  targetUserId: number;
+  targetUsername: string;
+  previousRole: UserRole;
+  newRole: UserRole;
+  previousEnabled: boolean;
+  newEnabled: boolean;
+  actorUserId: number;
+  actorUsername: string;
+  changedAt: string;
 }
 
 export interface AuthResponse {

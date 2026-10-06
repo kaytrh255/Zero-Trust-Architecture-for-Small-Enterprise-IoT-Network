@@ -109,6 +109,14 @@ public class GlobalExceptionHandler {
         return errorNoStore(HttpStatus.BAD_REQUEST, "INVALID_MFA_OPERATION", exception.getMessage(), request);
     }
 
+    @ExceptionHandler(InvalidUserManagementException.class)
+    public ResponseEntity<ApiError> handleInvalidUserManagement(
+            InvalidUserManagementException exception,
+            HttpServletRequest request
+    ) {
+        return errorNoStore(HttpStatus.BAD_REQUEST, "INVALID_USER_MANAGEMENT", exception.getMessage(), request);
+    }
+
     @ExceptionHandler(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class)
     public ResponseEntity<ApiError> handleInvalidParameter(HttpServletRequest request) {
         return error(HttpStatus.BAD_REQUEST, "INVALID_PARAMETER", "A request parameter has an invalid value", request);
@@ -166,7 +174,9 @@ public class GlobalExceptionHandler {
     ) {
         ApiError body = new ApiError(Instant.now(), status.value(), code, message, request.getRequestURI());
         ResponseEntity.BodyBuilder response = ResponseEntity.status(status);
-        if ("/api/admin/mfa/recovery".equals(request.getRequestURI())) {
+        String requestUri = request.getRequestURI();
+        if ("/api/admin/mfa/recovery".equals(requestUri)
+                || requestUri.startsWith("/api/admin/users")) {
             response.cacheControl(CacheControl.noStore());
         }
         return response.body(body);

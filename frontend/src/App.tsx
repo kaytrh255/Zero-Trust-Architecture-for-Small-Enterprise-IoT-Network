@@ -7,6 +7,7 @@ import { DevicesPage } from './pages/DevicesPage';
 import { OverviewPage } from './pages/OverviewPage';
 import { PoliciesPage } from './pages/PoliciesPage';
 import { TelemetryPage } from './pages/TelemetryPage';
+import { UserAccountsPage } from './pages/UserAccountsPage';
 import { UserPortalPage } from './pages/UserPortalPage';
 import { Shell, type ViewKey } from './components/Shell';
 import type { AuthResponse, UserProfile } from './types';
@@ -78,6 +79,7 @@ export default function App() {
       {activeView === 'authentication' && <AuthenticationAuditsPage key="authentication" {...pageProps} />}
       {activeView === 'telemetry' && <TelemetryPage key="telemetry" {...pageProps} />}
       {activeView === 'security' && <MfaSecurityPage key="security" token={token} user={user} notify={notify} onLogout={logout} />}
+      {activeView === 'accounts' && user.role === 'ADMIN' && <UserAccountsPage key="accounts" token={token} user={user} notify={notify} />}
     </Shell>
   );
 }

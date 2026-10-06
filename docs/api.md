@@ -115,6 +115,26 @@ The actor must be a different enabled ADMIN with MFA enabled and must prove thei
 
 Returns the append-only MFA security history in the common page envelope, newest first. Optional filters are `page`, `size`, inclusive `from` / `to`, `operation` (including `ADMIN_MFA_RECOVERY`), and target `username`. Responses use `Cache-Control: no-store`. Each item includes target `userId` / `username` and, for new events, `actorUserId` / `actorUsername`; legacy rows may have null actor fields. The UI marks the actor when it differs from the target.
 
+## Account lifecycle (Phase 27)
+
+### `GET /api/admin/users` — authenticated `ADMIN`
+
+Returns all user accounts ordered by username. Each item contains `id`, `username`, `fullName`, `role`, `enabled`, `mfaEnabled`, `createdAt`, and `updatedAt`; credential hashes, TOTP seeds, and recovery data are excluded. The response is `Cache-Control: no-store`. `SECURITY_ANALYST` and `USER` callers receive `403`.
+
+### `PUT /api/admin/users/{id}` — authenticated `ADMIN`
+
+Provide the complete desired role and enabled status:
+
+```json
+{"role":"SECURITY_ANALYST","enabled":true}
+```
+
+Allowed managed roles are `ADMIN`, `SECURITY_ANALYST`, and `USER`; `DEVICE` is reserved for internal identities. The `200` response contains the updated safe account profile and uses `Cache-Control: no-store`. A successful actual change revokes every existing access token by incrementing the account auth version and deletes pending MFA login/enrollment challenges. The update and its append-only audit event are atomic. No-op updates return the current account without creating an audit event. Administrators cannot change their own role/status or disable/demote the last enabled ADMIN. Invalid changes return `400`; missing accounts return `404`.
+
+### `GET /api/admin/users/audits` — authenticated `ADMIN`
+
+Returns paginated account lifecycle events, newest first, with `Cache-Control: no-store`. Supports `page`, `size` (1–100), inclusive `from` / `to`, case-insensitive `targetUsername`, and `actorUsername` filters. Each event contains target and actor IDs/usernames plus previous/new role and enabled-state snapshots. The history is append-only; rejected and no-op requests do not create events. Flyway V18 adds the audit table, foreign keys, indexes, and mutation-prevention trigger.
+
 ### `GET /api/auth/me` — authenticated
 
 Send the token from login in the `Authorization` header. Returns the current user's safe profile. Missing, malformed, invalid, or expired tokens return `401 Unauthorized`.

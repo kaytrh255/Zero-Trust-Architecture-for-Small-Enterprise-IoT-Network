@@ -1,4 +1,4 @@
-name: Build and Compose integration (Phase 26)
+name: Build and Compose integration (Phase 27)
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: phase26-ci-${{ github.ref }}
+  group: phase27-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -194,7 +194,7 @@ jobs:
           PHASE17_BASE_URL: http://127.0.0.1:8080
         run: mvn --batch-mode -Dtest=Phase17LoginRateLimitComposeIntegrationTest test
 
-      - name: Enable mandatory privileged MFA for Phases 22–26
+      - name: Enable mandatory privileged MFA for Phases 22–27
         shell: bash
         run: |
           sed -i 's/^MFA_REQUIRE_PRIVILEGED=.*/MFA_REQUIRE_PRIVILEGED=true/' .env
@@ -311,6 +311,28 @@ jobs:
           PHASE26_BASE_URL: http://127.0.0.1:8080
         run: mvn --batch-mode -Dtest=Phase26AdminMfaRecoveryComposeIntegrationTest test
 
+      - name: Reset process-local limiter before Phase 27
+        run: docker compose restart backend
+
+      - name: Wait for backend before Phase 27
+        shell: bash
+        run: |
+          for attempt in $(seq 1 45); do
+            if curl --fail --silent http://127.0.0.1:8080/actuator/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --no-color --timestamps backend || true
+          exit 1
+
+      - name: Run Phase 27 account lifecycle integration test
+        working-directory: backend
+        env:
+          PHASE27_INTEGRATION: 'true'
+          PHASE27_BASE_URL: http://127.0.0.1:8080
+        run: mvn --batch-mode -Dtest=Phase27AccountLifecycleComposeIntegrationTest test
+
       - name: Add Maven test reports to the job summary
         if: always()
         shell: bash
@@ -345,7 +367,8 @@ jobs:
             target/surefire-reports/com.yak.zerotrust.integration.Phase23MfaRecoveryCodeRotationComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase24MfaManagementRateLimitComposeIntegrationTest.txt \
             target/surefire-reports/com.yak.zerotrust.integration.Phase25MfaRecoveryCodeDisableComposeIntegrationTest.txt \
-            target/surefire-reports/com.yak.zerotrust.integration.Phase26AdminMfaRecoveryComposeIntegrationTest.txt; do
+            target/surefire-reports/com.yak.zerotrust.integration.Phase26AdminMfaRecoveryComposeIntegrationTest.txt \
+            target/surefire-reports/com.yak.zerotrust.integration.Phase27AccountLifecycleComposeIntegrationTest.txt; do
             if [ ! -f "$report" ] || ! grep -Eq 'Failures: [1-9][0-9]*|Errors: [1-9][0-9]*' "$report"; then
               continue
             fi
@@ -359,7 +382,7 @@ jobs:
         shell: bash
         run: |
           backend_errors="$(docker compose logs --no-color --since 1m backend 2>&1 \
-            | grep -iE 'WARN|ERROR|Exception|Caused by:|mqtt|telemetry|audit|policy' \
+            | grep -iE 'WARN|ERROR|Exception|Caused by:|mqtt|telemetry|audit|policy|account' \
             | tail -n 40 | awk '{printf "%s ", $0}' | tr -s ' ' || true)"
           if [ -n "$backend_errors" ]; then
             backend_errors="${backend_errors:0:6000}"

@@ -9,6 +9,9 @@ import type {
   DeviceProvisioningResponse,
   DeviceStatus,
   DeviceType,
+  AssignableUserRole,
+  ManagedUserAccount,
+  UserAccountAudit,
   LoginResponse,
   MfaEnrollment,
   MfaRecoveryCodes,
@@ -135,6 +138,16 @@ export const api = {
       method: 'POST',
       body: { targetUsername, password, code },
     }),
+  adminUserAccounts: (token: string) => request<ManagedUserAccount[]>('/api/admin/users', { token }),
+  updateAdminUserAccount: (token: string, id: number, role: AssignableUserRole, enabled: boolean) =>
+    request<ManagedUserAccount>(`/api/admin/users/${id}`, { token, method: 'PUT', body: { role, enabled } }),
+  adminUserAccountAudits: (token: string, page = 0, filters: {
+    targetUsername?: string;
+    actorUsername?: string;
+  } = {}) => request<AuditPage<UserAccountAudit>>(
+    `/api/admin/users/audits${queryString({ page, size: 20, ...filters })}`,
+    { token },
+  ),
   mfaSecurityAudits: (token: string, page = 0, filters: { operation?: MfaSecurityAuditOperation; username?: string } = {}) =>
     request<AuditPage<MfaSecurityAudit>>(
       `/api/auth/mfa/audits${queryString({ page, size: 20, ...filters })}`,
